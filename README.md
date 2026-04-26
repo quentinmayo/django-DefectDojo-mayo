@@ -1,4 +1,6 @@
-# DefectDojo
+# defect-free
+
+_A fork of DefectDojo with additional features and enhancements._
 
 <table>
     <tr styl="margin: 0; position: absolute; top: 50%; -ms-transform: translateY(-50%); transform: translateY(-50%);">
@@ -27,6 +29,12 @@
 [DefectDojo](https://www.defectdojo.com/) is a DevSecOps, ASPM (application security posture management), and
 vulnerability management tool.  DefectDojo orchestrates end-to-end security testing, vulnerability tracking,
 deduplication, remediation, and reporting.
+
+Note: This repository, **defect-free**, is an independent fork of the DefectDojo project. It is maintained separately
+and is not affiliated with, endorsed by, or sponsored by the DefectDojo project or DefectDojo, Inc. The original
+upstream project is available at https://github.com/DefectDojo/django-DefectDojo.
+
+This fork preserves the original BSD 3-Clause license; see the `LICENSE.md` file for license terms and obligations.
 
 ## Demo
 

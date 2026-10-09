@@ -18,7 +18,7 @@ Please note that Open/Closed are not **explicit** Status types for Findings.  Ce
 
 Once a Finding is **Active**, it will be labeled as an **Open** Finding, regardless of whether or not it has been **Verified.**
 
-Open Findings can be seen from the **Findings \> Open Findings** view of DefectDojo.
+Open Findings can be seen from the Findings list (**Classic UI: Findings > Open Findings**, **Pro UI: Act > Explore > Findings > Active**).
 
 ### **Active Findings**
 
@@ -34,14 +34,14 @@ Just because a tool records a problem does not necessarily mean the Finding requ
 
 If you’re able to confirm that the Finding does exist, you can mark it as **Verified**.
 
-Certain DefectDojo functions require Findings to be Active and Verified.  If you don’t need to manually verify each Finding, you can deactivate the Verified requirement for any or all of these functions from the **System Settings** page (**Classic UI: Configuration > System Settings**, **Pro UI: Settings > Pro Settings > System Settings**).
+Certain DefectDojo functions require Findings to be Active and Verified.  If you don’t need to manually verify each Finding, you can deactivate the Verified requirement for any or all of these functions from the **System Settings** page (**Classic UI: Configuration > System Settings**, **Pro UI: Settings > System > System Settings**).
 
 ![image](images/verified_status_toggle.png)
 
 These Verified Statuses are required for
 
 * Pushing Jira Issues
-* Applying Grading to Products
+* Applying Grading to Assets
 * Calculating Metrics
 
 ## **Closed Finding Statuses**

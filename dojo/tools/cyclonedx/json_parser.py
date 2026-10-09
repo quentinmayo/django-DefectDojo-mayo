@@ -2,8 +2,8 @@ import json
 import logging
 
 import dateutil
-from django.conf import settings
 
+from dojo.location.feature import locations_enabled
 from dojo.models import Finding
 from dojo.tools.cyclonedx.helpers import Cyclonedxhelper
 from dojo.tools.locations import LocationData
@@ -25,14 +25,19 @@ class CycloneDXJSONParser:
         components = {}
         self._flatten_components(data.get("components", []), components)
         # Collect product-level dependency locations for all components
-        if settings.V3_FEATURE_LOCATIONS:
+        if locations_enabled():
             for component_data in components.values():
                 component_purl = component_data.get("purl")
                 if component_purl:
                     component_hashes = Cyclonedxhelper()._collect_hashes(component_data.get("hashes"))
                     license_expression = Cyclonedxhelper.extract_license_expression_json(component_data)
                     test.unsaved_metadata.append(
-                        LocationData.dependency(purl=component_purl, artifact_hashes=component_hashes, license_expression=license_expression),
+                        LocationData.dependency(
+                            purl=component_purl,
+                            artifact_hashes=component_hashes,
+                            license_expression=license_expression,
+                            component_type=component_data.get("type") or "",
+                        ),
                     )
         # for each vulnerabilities create one finding by component affected
         findings = []
@@ -87,13 +92,18 @@ class CycloneDXJSONParser:
                     dynamic_finding=False,
                     vuln_id_from_tool=vulnerability.get("id"),
                 )
-                if settings.V3_FEATURE_LOCATIONS:
+                if locations_enabled():
                     if component_data := components.get(reference, {}):
                         component_hashes = Cyclonedxhelper()._collect_hashes(component_data.get("hashes"))
                         license_expression = Cyclonedxhelper.extract_license_expression_json(component_data)
                         if component_purl := component_data.get("purl"):
                             finding.unsaved_locations.append(
-                                LocationData.dependency(purl=component_purl, artifact_hashes=component_hashes, license_expression=license_expression),
+                                LocationData.dependency(
+                                    purl=component_purl,
+                                    artifact_hashes=component_hashes,
+                                    license_expression=license_expression,
+                                    component_type=component_data.get("type") or "",
+                                ),
                             )
                         else:
                             finding.unsaved_locations.append(
@@ -102,6 +112,7 @@ class CycloneDXJSONParser:
                                     version=component_version,
                                     artifact_hashes=component_hashes,
                                     license_expression=license_expression,
+                                    component_type=component_data.get("type") or "",
                                 ),
                             )
                 if report_date:
@@ -112,7 +123,7 @@ class CycloneDXJSONParser:
                         rating.get("method") == "CVSSv3"
                         or rating.get("method") == "CVSSv31"
                     ):
-                        raw_vector = rating["vector"]
+                        raw_vector = rating.get("vector", "")
                         cvssv3 = Cyclonedxhelper()._get_cvssv3(raw_vector)
                         severity = rating.get("severity")
                         if cvssv3:
@@ -134,16 +145,17 @@ class CycloneDXJSONParser:
                     finding.unsaved_vulnerability_ids = vulnerability_ids
                 # if there is some CWE
                 cwes = vulnerability.get("cwes")
-                if cwes and len(cwes) > 1:
-                    # TODO: support more than one CWE
-                    LOGGER.debug(
-                        "more than one CWE for a finding %s. NOT supported by parser API", cwes,
-                    )
                 if cwes and len(cwes) > 0:
                     finding.cwe = cwes[0]
+                    finding.unsaved_cwes = cwes
                 # Check for mitigation
                 analysis = vulnerability.get("analysis")
                 if analysis:
+                    # Preserve the raw VEX analysis block on the finding so downstream
+                    # consumers can round-trip state/justification/response/detail. This
+                    # is an inert in-memory attribute; the mapping below is all the OSS
+                    # importer itself does with it.
+                    finding.unsaved_vex = analysis
                     state = analysis.get("state")
                     if state:
                         if state in {"resolved", "resolved_with_pedigree", "not_affected"}:

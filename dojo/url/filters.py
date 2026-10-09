@@ -9,7 +9,7 @@ from dojo.api_helpers.filters import StaticMethodFilters
 
 # from tagulous.forms import TagWidget
 # import tagulous
-from dojo.authorization.roles_permissions import Permissions
+from dojo.location.filter_scoping import OutwardRelationScopedFilterSet
 from dojo.location.queries import get_authorized_locations
 from dojo.location.status import FindingLocationStatus, ProductLocationStatus
 
@@ -19,7 +19,7 @@ BOOLEAN_CHOICES = (("false", "No"), ("true", "Yes"))
 EARLIEST_FINDING = None
 
 
-class URLFilter(StaticMethodFilters):
+class URLFilter(OutwardRelationScopedFilterSet, StaticMethodFilters):
     StaticMethodFilters.create_char_filters("url__protocol", "Protocol", locals())
     StaticMethodFilters.create_char_filters("url__user_info", "User Info", locals())
     StaticMethodFilters.create_char_filters("url__host", "Host", locals())
@@ -60,4 +60,4 @@ class URLFilter(StaticMethodFilters):
     @property
     def qs(self):
         parent = super().qs
-        return get_authorized_locations(Permissions.Location_View, parent)
+        return get_authorized_locations("view", parent)

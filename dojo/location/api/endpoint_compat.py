@@ -25,14 +25,22 @@ from rest_framework.serializers import ModelSerializer
 from rest_framework.viewsets import ReadOnlyModelViewSet
 
 from dojo.api_v2 import serializers
-from dojo.api_v2.permissions import check_object_permission
 from dojo.api_v2.prefetch import PrefetchListMixin, PrefetchRetrieveMixin
-from dojo.api_v2.serializers import TagListSerializerField
 from dojo.api_v2.views import report_generate
-from dojo.authorization.roles_permissions import Permissions
-from dojo.filters import CharFieldFilterANDExpression, CharFieldInFilter, OrderingFilter
+from dojo.authorization.api_permissions import check_object_permission
+from dojo.filters import OrderingFilter
+from dojo.location.api.tag_filters import (
+    ReadableHasTagsFilter,
+    ReadableTagANDFilter,
+    ReadableTagFilter,
+    ReadableTagInFilter,
+)
 from dojo.location.models import LocationFindingReference, LocationProductReference
-from dojo.location.queries import get_authorized_location_finding_reference, get_authorized_location_product_reference
+from dojo.location.queries import (
+    authorized_finding_references,
+    get_authorized_location_finding_reference,
+    get_authorized_location_product_reference,
+)
 from dojo.location.status import FindingLocationStatus
 from dojo.query_utils import build_count_subquery
 from dojo.url.models import URL
@@ -64,15 +72,19 @@ class UserHasLocationRefPermission(BasePermission):
         return check_object_permission(
             request,
             obj,
-            Permissions.Location_View,
-            Permissions.Location_Edit,
-            Permissions.Location_Delete,
+            "view",
+            "edit",
+            "delete",
         )
 
 
 ##########
 # Endpoint compatibility
 ##########
+
+# Rows here are LocationProductReference, so tag lookups resolve against location_id.
+_LOCATION = "location_id"
+
 
 class V3EndpointCompatibleFilterSet(FilterSet):
 
@@ -92,12 +104,12 @@ class V3EndpointCompatibleFilterSet(FilterSet):
 
     location_id = NumberFilter(field_name="location__id", lookup_expr="exact")
 
-    tag = CharFilter(field_name="location__tags__name", lookup_expr="icontains", help_text="Tag name contains")
-    tags = CharFieldInFilter(field_name="location__tags__name", lookup_expr="in", help_text="Comma separated list of exact tags (uses OR for multiple values)")
-    tags__and = CharFieldFilterANDExpression(field_name="location__tags__name", help_text="Comma separated list of exact tags to match with an AND expression")
-    not_tag = CharFilter(field_name="location__tags__name", lookup_expr="icontains", help_text="Not Tag name contains", exclude=True)
-    not_tags = CharFieldInFilter(field_name="location__tags__name", lookup_expr="in", help_text="Comma separated list of exact tags not present on model", exclude=True)
-    has_tags = BooleanFilter(field_name="location__tags", lookup_expr="isnull", exclude=True, label="Has tags")
+    tag = ReadableTagFilter(lookup_expr="icontains", location_field=_LOCATION, help_text="Tag name contains")
+    tags = ReadableTagInFilter(location_field=_LOCATION, help_text="Comma separated list of exact tags (uses OR for multiple values)")
+    tags__and = ReadableTagANDFilter(location_field=_LOCATION, help_text="Comma separated list of exact tags to match with an AND expression")
+    not_tag = ReadableTagFilter(lookup_expr="icontains", exclude=True, location_field=_LOCATION, help_text="Not Tag name contains")
+    not_tags = ReadableTagInFilter(exclude=True, location_field=_LOCATION, help_text="Comma separated list of exact tags not present on model")
+    has_tags = ReadableHasTagsFilter(location_field=_LOCATION, label="Has tags")
 
     o = OrderingFilter(
         fields=(
@@ -123,13 +135,16 @@ class V3EndpointCompatibleSerializer(ModelSerializer):
     path = CharField(source="location.url.path")
     query = CharField(source="location.url.query")
     fragment = CharField(source="location.url.fragment")
-    tags = TagListSerializerField(source="location.tags")
+    tags = SerializerMethodField()
     location_id = IntegerField(source="location.id")
     active_finding_count = IntegerField(read_only=True)
 
     class Meta:
         model = LocationProductReference
         exclude = ("location",)
+
+    def get_tags(self, obj: LocationProductReference) -> list[str]:
+        return sorted(tag.name for tag in obj.location.readable_tags)
 
 
 class V3EndpointCompatibleViewSet(PrefetchListMixin, PrefetchRetrieveMixin, viewsets.ReadOnlyModelViewSet):
@@ -150,13 +165,13 @@ class V3EndpointCompatibleViewSet(PrefetchListMixin, PrefetchRetrieveMixin, view
     def get_queryset(self):
         """Get authorized URLs using Endpoint authorization logic."""
         active_finding_subquery = build_count_subquery(
-            LocationFindingReference.objects.filter(
+            authorized_finding_references(self.request.user).filter(
                 location=OuterRef("location"),
                 status=FindingLocationStatus.Active,
             ),
             group_field="location",
         )
-        return get_authorized_location_product_reference(Permissions.Location_View).filter(
+        return get_authorized_location_product_reference("view").filter(
             location__location_type=URL.LOCATION_TYPE,
         ).annotate(
             active_finding_count=Coalesce(active_finding_subquery, Value(0)),
@@ -242,7 +257,11 @@ class V3EndpointStatusCompatibleFilterSet(FilterSet):
         return queryset.filter(status=FindingLocationStatus.Mitigated, auditor__iexact=value)
 
     def filter_endpoint(self, queryset, name, value):
-        return queryset.filter(location__products__id=value)
+        # A Location is shared, so match only against references the caller may see.
+        visible = get_authorized_location_product_reference(
+            "view", user=getattr(getattr(self, "request", None), "user", None),
+        ).filter(id=value)
+        return queryset.filter(location__products__in=visible)
 
     class Meta:
         model = LocationFindingReference
@@ -270,7 +289,7 @@ class V3EndpointStatusCompatibleSerializer(ModelSerializer):
         return obj.created.date() if obj.created else None
 
     def get_mitigated(self, obj) -> bool | None:
-        return obj.created.date() if obj.created else None
+        return obj.status == FindingLocationStatus.Mitigated
 
     def get_mitigated_time(self, obj) -> datetime.datetime | None:
         return obj.audit_time if self.get_mitigated(obj) else None
@@ -316,4 +335,4 @@ class V3EndpointStatusCompatibleViewSet(PrefetchListMixin, PrefetchRetrieveMixin
 
     def get_queryset(self):
         """Get authorized URLs using Endpoint authorization logic."""
-        return get_authorized_location_finding_reference(Permissions.Location_View).filter(location__location_type=URL.LOCATION_TYPE).distinct()
+        return get_authorized_location_finding_reference("view").filter(location__location_type=URL.LOCATION_TYPE).distinct()

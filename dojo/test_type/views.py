@@ -6,11 +6,11 @@ from django.contrib.auth.decorators import login_required
 from django.http import HttpResponseRedirect
 from django.shortcuts import get_object_or_404, render
 from django.urls import reverse
+from django.utils.translation import gettext as _
 
-from dojo.authorization.authorization_decorators import user_is_configuration_authorized
-from dojo.filters import TestTypeFilter
 from dojo.forms import Test_TypeForm
 from dojo.models import Test_Type
+from dojo.test.ui.filters import TestTypeFilter
 from dojo.utils import add_breadcrumb, get_page_items
 
 logger = logging.getLogger(__name__)
@@ -38,7 +38,6 @@ def test_type(request):
         "name_words": name_words})
 
 
-@user_is_configuration_authorized("dojo.add_test_type")
 def add_test_type(request):
     form = Test_TypeForm()
     if request.method == "POST":
@@ -47,7 +46,7 @@ def add_test_type(request):
             form.save()
             messages.add_message(request,
                                  messages.SUCCESS,
-                                 "Test type added successfully.",
+                                 _("Test type added successfully."),
                                  extra_tags="alert-success")
             return HttpResponseRedirect(reverse("test_type"))
     add_breadcrumb(title="Add Test Type", top_level=False, request=request)
@@ -59,7 +58,6 @@ def add_test_type(request):
     })
 
 
-@user_is_configuration_authorized("dojo.change_test_type")
 def edit_test_type(request, ptid):
     tt = get_object_or_404(Test_Type, pk=ptid)
     form = Test_TypeForm(instance=tt)
@@ -69,7 +67,7 @@ def edit_test_type(request, ptid):
             tt = form.save()
             messages.add_message(request,
                                  messages.SUCCESS,
-                                 "Test type updated successfully.",
+                                 _("Test type updated successfully."),
                                  extra_tags="alert-success")
             return HttpResponseRedirect(reverse("test_type"))
 

@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% load i18n %}
 {% load navigation_tags %}
 {% load get_config_setting %}
 {% block content %}
@@ -7,8 +8,8 @@
       <div class="col-md-12">
           <div class="panel panel-default table-responsive">
               <div class="panel-heading">
-                  <h4>Engagement Presets
-                      <a title="Add New Engagement Preset" class="pull-right btn btn-primary btn-sm"
+                  <h4><i class="fa-solid fa-sliders dd-card-icon" aria-hidden="true"></i>Engagement Presets
+                      <a title="{% trans 'Add New Engagement Preset' %}" class="pull-right btn btn-primary btn-sm"
                          href="{% url 'add_engagement_presets' prod.id %}"><span class="fa-solid fa-plus"></span></a>
                   </h4>
               </div>
@@ -28,7 +29,7 @@
                             <td>
                                 {{ preset.title }}
                             </td>
-                            <td style="width: 400px;">
+                            <td style="min-width: 200px; max-width: 400px;">
                               {% if preset.test_type.all.count > 1 %}
                                 {% for test in preset.test_type.all %}
                                    {{test.name}}{%if not forloop.last%},{%endif%}
@@ -37,7 +38,7 @@
                                 {{ preset.test_type.all.0.name }}
                               {% endif %}
                             </td>
-                            <td style="width: 400px;">
+                            <td style="min-width: 200px; max-width: 400px;">
                               {% if preset.network_locations.all.count > 1 %}
                                 {% for net in preset.network_locations.all %}
                                    {{ net.location }}{%if not forloop.last%},{%endif%}

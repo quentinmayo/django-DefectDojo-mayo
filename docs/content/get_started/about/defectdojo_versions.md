@@ -12,17 +12,17 @@ weight: 1
 
 | Feature / Capability | DefectDojo Open-Source | DefectDojo Pro |
 |---------------------|------------------------|----------------|
-| Core vulnerability management | ✔️ Import, track, and manage findings from 200+ security tools | ✔️ Everything in open-source, optimized for scale |
+| Core vulnerability management | ✔️ Import, track, and manage findings from 500+ security tools | ✔️ Everything in open-source, optimized for scale |
 | Finding deduplication | ✔️ Standard deduplication | ✔️ Advanced, configurable deduplication |
 | REST API | ✔️ Full REST API | ✔️ Full REST API |
-| Authentication & access control | ✔️ Local auth and basic RBAC | ✔️ SSO (SAML/OAuth), MFA, advanced RBAC |
+| Authentication & access control | ✔️ Local accounts and per-Asset access lists | ✔️ SSO (SAML, OIDC, OAuth), LDAP, MFA, role-based access control |
 | User interface | ✔️ Community UI | ✔️ Modern Pro UI with performance improvements |
 | Dashboards & reporting | ✔️ Basic dashboards and reports | ✔️ Advanced, customizable dashboards and executive reporting |
 | Automation & workflows | ❌ Not included | ✔️ Rules Engine and automated workflows |
 | Import enhancements | ❌ Standard imports only | ✔️ Background imports, Smart Upload, Universal Parser, CLI uploads |
-| Tool integrations | ❌ Manual/API-driven | ✔️ Built-in **API Connectors** for popular AppSec and cloud tools |
+| Tool integrations | ❌ Manual/API-driven | ✔️ Built-in **Upstream Connectors** for popular AppSec and cloud tools |
 | Jira integration | ✔️ Included | ✔️ Included |
-| Project management integrations | ❌ Not included | ✔️ integrate with **Azure Devops**, **GitHub**, **GitLab** and **ServiceNow** |
+| Project management integrations | ❌ Not included | ✔️ **Downstream Connectors** to **Jira**, **Azure DevOps**, **GitHub**, **GitLab**, **ServiceNow**, **Bitbucket**, **Shortcut**, **PagerDuty**, **Zendesk**, **ServiceDesk Plus** and **Freshservice** |
 | Finding enhancements | ❌ Not included | ✔️ Automatic KEV, EPSS scoring and Ransomware tracking |
 | SOC & AppSec unification | ❌ AppSec-focused only | ✔️ Unified AppSec and SOC findings |
 | AI & next-generation features | ❌ Not included | ✔️ AI-assisted workflows, reporting and MCP support |

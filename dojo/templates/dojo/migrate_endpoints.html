@@ -8,7 +8,7 @@
         <div class="col-md-12">
             <div class="panel panel-default">
                 <div class="panel-heading tight">
-                    <h3 class="has-filters">{{ name }}</h3>
+                    <h3 class="has-filters"><i class="fa-solid fa-right-left dd-card-icon" aria-hidden="true"></i>{{ name }}</h3>
                 </div>
             </div>
             <h5>
@@ -21,7 +21,7 @@
                 <pre><code>python manage.py migrate_endpoints_to_locations</code></pre>
             </h5>
             <div class="panel-heading">
-                <form class="form-horizontal" method="post">
+                <form class="" method="post">
                     {% csrf_token %}
                     <div class="form-group">
                         <button class="btn btn-primary" type="submit" name="run_migration">Run migration</button>

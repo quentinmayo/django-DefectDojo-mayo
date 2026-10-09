@@ -1,25 +1,31 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Self, TypeVar
+import hashlib
+from typing import TYPE_CHECKING, Self
 
-from django.db import transaction
+from django.contrib.postgres.indexes import GinIndex
+from django.contrib.postgres.search import SearchVector
+from django.core.validators import MinLengthValidator
+from django.db import IntegrityError, transaction
 from django.db.models import (
     CASCADE,
     RESTRICT,
     CharField,
     DateTimeField,
+    Exists,
     ForeignKey,
     Index,
     JSONField,
     Model,
     OneToOneField,
+    OuterRef,
     Q,
     QuerySet,
     TextChoices,
     UniqueConstraint,
 )
 from django.utils.translation import gettext_lazy as _
-from tagulous.models import TagField
+from django_tagulous.models import TagField
 
 from dojo.base_models.base import BaseModel, BaseModelWithoutTimeMeta
 from dojo.base_models.validators import validate_not_empty
@@ -32,10 +38,11 @@ from dojo.location.manager import (
     LocationQueryset,
 )
 from dojo.location.status import FindingLocationStatus, ProductLocationStatus
-from dojo.models import Dojo_User, Finding, Product, _manage_inherited_tags, copy_model_util
+from dojo.models import Dojo_User, Finding, Product, copy_model_util
 from dojo.tools.locations import LocationAssociationData
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
     from datetime import datetime
 
     from dojo.tools.locations import LocationData
@@ -80,6 +87,23 @@ class Location(BaseModel):
 
     def __str__(self):
         return self.location_value
+
+    @property
+    def readable_tags(self):
+        """Tags on this row, or none of them when another product also labels the row."""
+        # ponytail: one EXISTS per rendered row; annotate the list querysets if it shows up.
+        from dojo.location.queries import location_tags_readable  # noqa: PLC0415
+        if not location_tags_readable(self):
+            return []
+        return list(self.tags.all())
+
+    @property
+    def readable_inherited_tags(self):
+        """The inherited subset of :attr:`readable_tags`."""
+        from dojo.location.queries import location_tags_readable  # noqa: PLC0415
+        if not location_tags_readable(self):
+            return []
+        return list(self.inherited_tags.all())
 
     def status_from_finding(self, finding: Finding) -> str:
         """Determine the status the reference should carry based on the status of the finding"""
@@ -223,24 +247,63 @@ class Location(BaseModel):
         return []
 
     def all_related_products(self) -> QuerySet[Product]:
-        return Product.objects.filter(
-            Q(locations__location=self)
-            | Q(engagement__test__finding__locations__location=self),
-        ).distinct()
+        direct_match = LocationProductReference.objects.filter(
+            product_id=OuterRef("pk"),
+            location=self,
+        )
+        finding_match = LocationFindingReference.objects.filter(
+            location=self,
+            finding__test__engagement__product_id=OuterRef("pk"),
+        )
+        return Product.objects.annotate(
+            _has_direct_location=Exists(direct_match),
+            _has_finding_location=Exists(finding_match),
+        ).filter(
+            Q(_has_direct_location=True) | Q(_has_finding_location=True),
+        )
+
+    def iter_related_products(self) -> list[Product]:
+        """
+        Prefetch-friendly equivalent of `all_related_products()`.
+
+        Walks `self.products.all()` (LocationProductReference) and
+        `self.findings.all()` (LocationFindingReference -> Finding -> Test ->
+        Engagement -> Product) via Django related managers, so a caller that
+        already issued
+
+            Location.objects.filter(...).prefetch_related(
+                "products__product__tags",
+                "findings__finding__test__engagement__product__tags",
+            )
+
+        gets every Product (and its tags) in 0 extra queries per Location.
+
+        Use this method from bulk paths where many Locations are processed at
+        once. The original `all_related_products()` still issues a single
+        EXISTS-based query and is kept for per-instance signal paths where
+        prefetching is not possible.
+        """
+        seen: set[int] = set()
+        result: list[Product] = []
+        for ref in self.products.all():
+            if ref.product_id not in seen:
+                seen.add(ref.product_id)
+                result.append(ref.product)
+        for ref in self.findings.all():
+            product = ref.finding.test.engagement.product
+            if product.id not in seen:
+                seen.add(product.id)
+                result.append(product)
+        return result
 
     def products_to_inherit_tags_from(self) -> list[Product]:
         from dojo.utils import get_system_setting  # noqa: PLC0415
-        system_wide_inherit = get_system_setting("enable_product_tag_inheritance")
-        return [
-            product for product
-            in self.all_related_products()
-            if product.enable_product_tag_inheritance or system_wide_inherit
-        ]
-
-    def inherit_tags(self, potentially_existing_tags):
-        # get a copy of the tags to be inherited
-        incoming_inherited_tags = [tag.name for product in self.products_to_inherit_tags_from() for tag in product.tags.all()]
-        _manage_inherited_tags(self, incoming_inherited_tags, potentially_existing_tags=potentially_existing_tags)
+        # System-wide setting is cached — short-circuit before reading the
+        # per-product flag on every related product.
+        products = self.all_related_products()
+        if get_system_setting("enable_product_tag_inheritance"):
+            return products
+        return [product for product in products if product.enable_product_tag_inheritance]
 
     class Meta:
         verbose_name = "Locations - Location"
@@ -248,11 +311,14 @@ class Location(BaseModel):
         indexes = [
             Index(fields=["location_type"]),
             Index(fields=["location_value"]),
+            # Global search (pro/search/): weighted tsvector FTS + trigram fuzzy match.
+            GinIndex(
+                SearchVector("location_value", weight="A", config="english")
+                + SearchVector("location_type", weight="B", config="english"),
+                name="dojo_location_fts_gin",
+            ),
+            GinIndex(fields=["location_value"], opclasses=["gin_trgm_ops"], name="dojo_location_locval_trgm"),
         ]
-
-
-# TypeVar to help linting in AbstractLocation child classes
-T = TypeVar("T", bound="AbstractLocation")
 
 
 class AbstractLocation(BaseModelWithoutTimeMeta):
@@ -263,9 +329,29 @@ class AbstractLocation(BaseModelWithoutTimeMeta):
         null=False,
         related_name="%(class)s",
     )
+    identity_hash = CharField(
+        null=False,
+        blank=False,
+        max_length=64,
+        editable=False,
+        unique=True,
+        db_index=True,
+        validators=[MinLengthValidator(64)],
+        help_text=_("The hash of the location for uniqueness"),
+    )
 
     class Meta:
         abstract = True
+
+    def __hash__(self) -> int:
+        return hash(str(self))
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, type(self)) and str(self) == str(other)
+
+    def clean(self, *args: list, **kwargs: dict) -> None:
+        self.set_identity_hash()
+        super().clean(*args, **kwargs)
 
     @classmethod
     def get_location_type(cls) -> str:
@@ -279,13 +365,16 @@ class AbstractLocation(BaseModelWithoutTimeMeta):
         raise NotImplementedError(msg)
 
     @staticmethod
-    def create_location_from_value(value: str) -> T:
+    def create_location_from_value(value: str) -> Self:
         """
         Dynamically create a Location and subclass instance based on location_type
         and location_value. Uses parse_string_value from the correct subclass.
         """
         msg = "Subclasses must implement create_location_from_value"
         raise NotImplementedError(msg)
+
+    def set_identity_hash(self):
+        self.identity_hash = hashlib.blake2b(str(self).encode(), digest_size=32).hexdigest()
 
     def pre_save_logic(self):
         """Automatically create or update the associated Location."""
@@ -303,7 +392,7 @@ class AbstractLocation(BaseModelWithoutTimeMeta):
             self.location.save(update_fields=["location_type", "location_value"])
 
     @classmethod
-    def from_location_data(cls: T, location_data: LocationData) -> T:
+    def from_location_data(cls, location_data: LocationData) -> Self:
         """
         Checks that the given LocationData object represents this type, then calls #_from_location_data_impl() to build
         one based on its contents. Saving boilerplate checking is all.
@@ -314,7 +403,7 @@ class AbstractLocation(BaseModelWithoutTimeMeta):
         return cls._from_location_data_impl(location_data)
 
     @classmethod
-    def _from_location_data_impl(cls: T, location_data: LocationData) -> T:
+    def _from_location_data_impl(cls, location_data: LocationData) -> Self:
         """Given a LocationData object trusted to represent this type, build a Location object from its contents."""
         msg = "Subclasses must implement _from_location_data_impl"
         raise NotImplementedError(msg)
@@ -328,10 +417,173 @@ class AbstractLocation(BaseModelWithoutTimeMeta):
         return getattr(self, "_association_data", LocationAssociationData())
 
     @classmethod
-    def get_or_create_from_object(cls: T, location: T) -> T:
+    def get_or_create_from_object(cls, location: Self) -> Self:
         """Given an object of this type, this method should get/create the object and return it."""
         msg = "Subclasses must implement get_or_create_from_object"
         raise NotImplementedError(msg)
+
+    # Upper bound on the concurrent-writer recovery retries in
+    # bulk_get_or_create. Each pass shrinks the batch to only the rows still
+    # missing, so the loop makes progress every iteration; the cap guards
+    # against pathological churn rather than being expected to be reached.
+    _BULK_CREATE_MAX_ATTEMPTS = 3
+
+    @classmethod
+    def _existing_by_identity_hash(cls, hashes: list[str]) -> dict[str, Self]:
+        """Map identity_hash -> already-saved instance for the given hashes."""
+        return {
+            obj.identity_hash: obj
+            for obj in cls.objects.filter(identity_hash__in=hashes).select_related("location")
+        }
+
+    @classmethod
+    def bulk_get_or_create(cls, locations: Iterable[Self], *, created_out: list[Self] | None = None) -> list[Self]:
+        """
+        Get or create multiple locations in bulk.
+
+        For each location, looks up by identity_hash. Creates missing ones using
+        bulk_create for both the parent Location rows and the subtype rows.
+        Returns the full list of saved instances (existing + newly created),
+        in the same order as the input. Duplicate inputs map to the same saved instance.
+
+        If ``created_out`` is given, the instances created by THIS call (those absent
+        before it, deduplicated by identity_hash) are appended to it. A chunked backfill
+        can sum ``len(created_out)`` per chunk to report the distinct locations it created
+        without holding a set of every location id for the whole run — the accumulator
+        that otherwise grows with the corpus and OOMs a large migration.
+
+        identity_hash is a global singleton, so two imports that reference the same
+        package (Dependency) or endpoint (URL) race to create the same row. Creation
+        tolerates that race — see ``_bulk_create_tolerating_races`` — rather than
+        letting one importer abort the other's whole scan import.
+        """
+        if not locations:
+            return []
+
+        # Create the list of hashes of the supplied locations; we will also use this to reconstruct the initial ordering
+        # of locations we return (which would otherwise be lost if duplicates are represented in `locations`).
+        hashes = []
+        for loc in locations:
+            # Sanity check the given locations list is homogenous
+            if not isinstance(loc, cls):
+                error_message = f"Invalid location type; expected {cls} but got {type(loc)}"
+                raise TypeError(error_message)
+            # A set identity_hash means the instance already went through clean()
+            # (locations are hashed only there) — re-cleaning would repeat idna/URL
+            # normalization work per row for nothing. Callers that mutate a location
+            # after cleaning it must re-clean before passing it in.
+            if not loc.identity_hash:
+                loc.clean()
+            hashes.append(loc.identity_hash)
+
+        # Look up existing objects, grouping by hash
+        existing_by_hash = cls._existing_by_identity_hash(hashes)
+
+        # Determine which locations still need creating, deduplicated by hash.
+        to_create: dict[str, Self] = {}
+        for loc in locations:
+            if loc.identity_hash in existing_by_hash:
+                # Preserve association data from the input onto the existing saved object, in case we're associating
+                # existing locations with findings/products
+                saved = existing_by_hash[loc.identity_hash]
+                if hasattr(loc, "_association_data") and not hasattr(saved, "_association_data"):
+                    saved._association_data = loc._association_data
+            elif loc.identity_hash not in to_create:
+                # First occurrence of a not-yet-persisted hash in this batch
+                to_create[loc.identity_hash] = loc
+
+        # Create 'em (tolerating a concurrent writer that beats us to some rows)
+        if to_create:
+            existing_by_hash.update(cls._bulk_create_tolerating_races(to_create))
+            if created_out is not None:
+                # to_create holds one entry per hash absent at the start of this call,
+                # i.e. exactly the new distinct locations. Single-writer migrations see no
+                # races, so this is the set this run created. (A concurrent writer that
+                # beat us to a row would leave it counted here but resolved to the other
+                # writer's instance — immaterial to a single-threaded backfill.)
+                created_out.extend(to_create.values())
+
+        # Return in input order
+        return [existing_by_hash[h] for h in hashes]
+
+    @classmethod
+    def _bulk_create_tolerating_races(cls, to_create: dict[str, Self]) -> dict[str, Self]:
+        """
+        Bulk create the given subtype rows (keyed by identity_hash), tolerating a
+        concurrent writer that commits some of the same identity_hashes first.
+
+        Parent Location rows and their subtype rows are created together inside a
+        savepoint. A unique-constraint collision aborts the whole INSERT, so the
+        savepoint rolls back — the batch's parent Locations included, leaving no
+        orphaned rows — and the enclosing transaction stays usable. We then
+        re-resolve the rows the concurrent writer committed, drop them from the
+        batch, and retry only the genuine remainder.
+
+        Without this, one racing import raised IntegrityError out of the whole
+        persist() and aborted the entire scan import: identity_hash is a global
+        singleton, so two imports referencing the same package collide routinely.
+        """
+        location_type = cls.get_location_type()
+        resolved: dict[str, Self] = {}
+        remaining = dict(to_create)
+
+        for _attempt in range(cls._BULK_CREATE_MAX_ATTEMPTS):
+            batch = list(remaining.values())
+            try:
+                with transaction.atomic():
+                    # Bulk create parent Locations
+                    parents = [
+                        Location(
+                            location_type=location_type,
+                            location_value=loc.get_location_value(),
+                        )
+                        for loc in batch
+                    ]
+                    Location.objects.bulk_create(parents, batch_size=1000)
+                    # Assign Location FKs to the subtypes, then bulk create them.
+                    for loc, parent in zip(batch, parents, strict=True):
+                        loc.location_id = parent.id
+                        loc.location = parent
+                    cls.objects.bulk_create(batch, batch_size=1000)
+            except IntegrityError:
+                # A concurrent writer committed one or more of these between our
+                # existence check and this INSERT. Re-resolve those, carry over
+                # their association data, and retry the rest. The savepoint
+                # rollback already discarded this batch's parents, so nothing is
+                # orphaned.
+                remaining = cls._absorb_raced_rows(remaining, resolved)
+                if not remaining:
+                    return resolved
+                continue
+            # No collision: every remaining row was created in this batch.
+            resolved.update(remaining)
+            return resolved
+
+        # Retries exhausted (persistent contention). Resolve whatever now exists
+        # so callers still get saved instances; only a hash that is genuinely
+        # still absent is a real failure.
+        remaining = cls._absorb_raced_rows(remaining, resolved)
+        if remaining:
+            error_message = (
+                f"Could not persist {cls.__name__} rows for identity_hashes: {sorted(remaining)}"
+            )
+            raise IntegrityError(error_message)
+        return resolved
+
+    @classmethod
+    def _absorb_raced_rows(cls, remaining: dict[str, Self], resolved: dict[str, Self]) -> dict[str, Self]:
+        """
+        Move rows a concurrent writer already committed out of ``remaining`` and
+        into ``resolved`` (carrying the input's association data onto the fetched
+        instance), and return the hashes still needing creation.
+        """
+        now_existing = cls._existing_by_identity_hash(list(remaining))
+        for identity_hash, saved in now_existing.items():
+            source = remaining[identity_hash]
+            if hasattr(source, "_association_data") and not hasattr(saved, "_association_data"):
+                saved._association_data = source._association_data
+        resolved.update(now_existing)
+        return {h: loc for h, loc in remaining.items() if h not in now_existing}
 
 
 class ReferenceDataMixin(Model):
@@ -406,6 +658,10 @@ class LocationFindingReference(BaseModel, ReferenceDataMixin):
         copy.finding = finding
         copy.location = self.location
         copy.save()
+        # Re-home the shared location onto the copied finding's product. Without this a
+        # finding copied/moved into a different product keeps a location that is only
+        # associated with the source product. Mirrors associate_with_finding().
+        copy.location.associate_with_product(finding.test.engagement.product)
         return copy
 
     def set_status(self, status: FindingLocationStatus, auditor: Dojo_User, audit_time: datetime) -> None:

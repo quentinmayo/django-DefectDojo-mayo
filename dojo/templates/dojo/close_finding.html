@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% load i18n %}
 {% load event_tags %}
 {% block content %}
     {{ block.super }}
@@ -12,15 +13,15 @@
         {{ note_type.name}}<br>
       {% endfor %}
     {% endif %}
-    <form class="form-horizontal" action="{% url 'close_finding' finding.id %}" method="post">
+    <form class="" action="{% url 'close_finding' finding.id %}" method="post">
         {% csrf_token %}
         {% include "dojo/form_fields.html" with form=form %}
         <div class="form-group">
             <div class="col-sm-offset-2 col-sm-10">
               {% if note_types|length <= 1 %}
-                <input class="btn btn-primary" name='submit' type="submit" value="Close Finding" aria-label="Close Finding"/>
+                <input class="btn btn-primary" name='submit' type="submit" value="Close Finding" aria-label="{% trans 'Close Finding' %}"/>
               {% elif note_types|length > 1 %}
-                <input class="btn btn-primary" name='submit' type="submit" value="Add Note" aria-label="Add Note"/>
+                <input class="btn btn-primary" name='submit' type="submit" value="Add Note" aria-label="{% trans 'Add Note' %}"/>
               {% endif %}
             </div>
         </div>

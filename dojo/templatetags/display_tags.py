@@ -16,19 +16,21 @@ from django import template
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.contrib.contenttypes.models import ContentType
+from django.contrib.staticfiles import finders
 from django.db.models import Case, IntegerField, Sum, Value, When
 from django.template.defaultfilters import stringfilter
 from django.urls import reverse
 from django.utils import timezone
-from django.utils.html import conditional_escape, escape
+from django.utils.html import escape
 from django.utils.safestring import mark_safe
 from django.utils.translation import gettext as _
 
-import dojo.jira_link.helper as jira_helper
 import dojo.utils
 from dojo import __docs__, __version__
+from dojo.jira import services as jira_services
+from dojo.location.feature import locations_enabled
 from dojo.models import Benchmark_Product, Check_List, Dojo_User, FileAccessToken, Finding, Product, System_Settings
-from dojo.utils import calculate_grade, get_file_images, get_full_url, get_system_setting, prepare_for_view
+from dojo.utils import get_file_images, get_full_url, get_system_setting, prepare_for_view, schedule_product_grade
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +142,24 @@ def dojo_version():
     version = __version__
     if settings.FOOTER_VERSION:
         version = settings.FOOTER_VERSION
-    return f"v. {version}"
+    return f"Version {version}"
+
+
+@register.simple_tag
+def static_v(static_path):
+    """
+    Cache-busting query value for a static asset.
+
+    Returns the integer mtime of the file under STATIC_ROOT (or
+    STATICFILES_DIRS) so any local edit forces a fresh fetch. Falls
+    back to the dojo version string when the file isn't found, which
+    is enough granularity for release deploys.
+    """
+    with contextlib.suppress(Exception):
+        path = finders.find(static_path)
+        if path:
+            return str(int(Path(path).stat().st_mtime))
+    return __version__.replace(".", "")
 
 
 @register.simple_tag
@@ -363,9 +382,7 @@ def product_grade(product):
     if system_settings.enable_product_grade and product:
         prod_numeric_grade = product.prod_numeric_grade
         if not prod_numeric_grade or prod_numeric_grade is None:
-            from dojo.celery_dispatch import dojo_dispatch_task  # noqa: PLC0415 circular import
-
-            dojo_dispatch_task(calculate_grade, product.id)
+            schedule_product_grade(product.id)
         if prod_numeric_grade:
             if prod_numeric_grade >= system_settings.product_grade_a:
                 grade = "A"
@@ -589,47 +606,30 @@ def last_value(value):
     return value
 
 
+def _option_icon(option):
+    # option is a Product_Platform / Product_Lifecycle / Product_Origin instance (or None).
+    # The icon and label now live on the editable option row; fall back to the label text
+    # for custom options that have no icon configured.
+    if not option:
+        return ""
+    if option.icon:
+        return mark_safe(icon(option.icon, option.name))
+    return option.name
+
+
 @register.filter
 def platform_icon(value):
-    if value == Product.WEB_PLATFORM:
-        return mark_safe(icon("list-alt", "Web"))
-    if value == Product.DESKTOP_PLATFORM:
-        return mark_safe(icon("desktop", "Desktop"))
-    if value == Product.MOBILE_PLATFORM:
-        return mark_safe(icon("mobile", "Mobile"))
-    if value == Product.WEB_SERVICE_PLATFORM:
-        return mark_safe(icon("plug", "Web Service"))
-    if value == Product.IOT:
-        return mark_safe(icon("random", "Internet of Things"))
-    return ""  # mark_safe(not_specified_icon('Platform Not Specified'))
+    return _option_icon(value)
 
 
 @register.filter
 def lifecycle_icon(value):
-    if value == Product.CONSTRUCTION:
-        return mark_safe(icon("compass", "Explore"))
-    if value == Product.PRODUCTION:
-        return mark_safe(icon("ship", "Sustain"))
-    if value == Product.RETIREMENT:
-        return mark_safe(icon("moon-o", "Retire"))
-    return ""  # mark_safe(not_specified_icon('Lifecycle Not Specified'))
+    return _option_icon(value)
 
 
 @register.filter
 def origin_icon(value):
-    if value == Product.THIRD_PARTY_LIBRARY_ORIGIN:
-        return mark_safe(icon("book", "Third-Party Library"))
-    if value == Product.PURCHASED_ORIGIN:
-        return mark_safe(icon("money", "Purchased"))
-    if value == Product.CONTRACTOR_ORIGIN:
-        return mark_safe(icon("suitcase", "Contractor Developed"))
-    if value == Product.INTERNALLY_DEVELOPED_ORIGIN:
-        return mark_safe(icon("home", "Internally Developed"))
-    if value == Product.OPEN_SOURCE_ORIGIN:
-        return mark_safe(icon("code", "Open Source"))
-    if value == Product.OUTSOURCED_ORIGIN:
-        return mark_safe(icon("globe", "Outsourced"))
-    return ""  # mark_safe(not_specified_icon('Origin Not Specified'))
+    return _option_icon(value)
 
 
 @register.filter
@@ -909,52 +909,52 @@ def jiraencode_component(value):
 
 @register.filter
 def jira_project(obj, *, use_inheritance=True):
-    return jira_helper.get_jira_project(obj, use_inheritance=use_inheritance)
+    return jira_services.get_project(obj, use_inheritance=use_inheritance)
 
 
 @register.filter
 def jira_issue_url(obj):
-    return jira_helper.get_jira_url(obj)
+    return jira_services.get_url(obj)
 
 
 @register.filter
 def jira_project_url(obj):
-    return jira_helper.get_jira_project_url(obj)
+    return jira_services.get_project_url(obj)
 
 
 @register.filter
 def jira_key(obj):
-    return jira_helper.get_jira_key(obj)
+    return jira_services.get_key(obj)
 
 
 @register.filter
 def jira_creation(obj):
-    return jira_helper.get_jira_creation(obj)
+    return jira_services.get_creation(obj)
 
 
 @register.filter
 def jira_change(obj):
-    return jira_helper.get_jira_change(obj)
+    return jira_services.get_change(obj)
 
 
 @register.filter
 def jira_qualified_findings(finding_group):
-    return jira_helper.get_qualified_findings(finding_group)
+    return jira_services.get_qualified_findings(finding_group)
 
 
 @register.filter
 def jira_non_qualified_findings(finding_group):
-    return jira_helper.get_non_qualified_findings(finding_group)
+    return jira_services.get_non_qualified_findings(finding_group)
 
 
 @register.filter
 def jira_sla_deadline(obj):
-    return jira_helper.get_sla_deadline(obj)
+    return jira_services.get_sla_deadline(obj)
 
 
 @register.filter
 def jira_severity(findings):
-    return jira_helper.get_severity(findings)
+    return jira_services.get_severity(findings)
 
 
 @register.filter
@@ -1004,15 +1004,21 @@ def class_name(value):
     return value.__class__.__name__
 
 
+def escape_popover_value(value):
+    """Escape a value for a popover attribute, which the popover parses as HTML again."""
+    # escape() and not conditional_escape(): the latter is a no-op on its own output.
+    return escape(escape(value))
+
+
 @register.filter(needs_autoescape=True)
 def jira_project_tag(product_or_engagement, *, autoescape=True):
     if autoescape:
-        esc = conditional_escape
+        esc = escape_popover_value
     else:
         def esc(x):
             return x
 
-    jira_project = jira_helper.get_jira_project(product_or_engagement)
+    jira_project = jira_services.get_project(product_or_engagement)
 
     if not jira_project:
         return ""
@@ -1028,7 +1034,7 @@ def jira_project_tag(product_or_engagement, *, autoescape=True):
         <b>Push Notes:</b> %s">
     </i>
     """
-    jira_project_no_inheritance = jira_helper.get_jira_project(product_or_engagement, use_inheritance=False)
+    jira_project_no_inheritance = jira_services.get_project(product_or_engagement, use_inheritance=False)
     inherited = bool(not jira_project_no_inheritance)
 
     icon = "fa-bug"
@@ -1065,7 +1071,7 @@ def import_settings_tag(test_import, *, autoescape=True):
         return ""
 
     if autoescape:
-        esc = conditional_escape
+        esc = escape_popover_value
     else:
         def esc(x):
             return x
@@ -1117,7 +1123,7 @@ def import_settings_tag(test_import, *, autoescape=True):
         esc(s.get("create_finding_groups_for_all_findings", None)),
     )
 
-    if not settings.V3_FEATURE_LOCATIONS:
+    if not locations_enabled():
         # TODO: Delete this after the move to Locations
         endpoints = esc(s.get("endpoints", s.get("endpoint", None)))
         return mark_safe(html % (icon, color, icon, *common_fields, endpoints, *extra_fields))
@@ -1149,3 +1155,11 @@ def import_history(finding, *, autoescape=True):
         list_of_status_changes += "<b>" + status_change.created.strftime("%b %d, %Y, %H:%M:%S") + "</b>: " + status_change.get_action_display() + "<br/>"
 
     return mark_safe(html % (list_of_status_changes))
+
+
+@register.filter
+def has_required_field(form):
+    """Returns True if the form has at least one required field"""
+    if not form:
+        return False
+    return any(field.field.required for field in form)

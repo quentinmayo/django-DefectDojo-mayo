@@ -1,12 +1,13 @@
 import json
 import logging
+from datetime import datetime
 
 from cvss import parser as cvss_parser
 from cvss.cvss3 import CVSS3
-from django.conf import settings
 
+from dojo.location.feature import locations_enabled
 from dojo.models import Finding
-from dojo.tools.locations import LocationData
+from dojo.tools.locations import LocationData, split_image_reference
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,7 @@ class AnchoreGrypeParser:
         logger.debug("file: %s", file)
         data = json.load(file)
         logger.debug("data: %s", data)
+        image_locations = self.image_locations(data.get("source") or {})
         dupes = {}
         for item in data.get("matches", []):
             vulnerability = item["vulnerability"]
@@ -59,6 +61,8 @@ class AnchoreGrypeParser:
                 vuln_fix_versions = vulnerability["fix"].get("versions")
             vuln_cvss = vulnerability.get("cvss")
             vuln_epss = vulnerability.get("epss")
+            vuln_known_exploited = vulnerability.get("knownExploited")
+            finding_kev_date = None
 
             rel_datasource = None
             rel_urls = None
@@ -76,7 +80,8 @@ class AnchoreGrypeParser:
                 rel_epss = related_vulnerability.get("epss")
                 rel_vuln_id = related_vulnerability.get("id")
             vulnerability_ids = self.get_vulnerability_ids(
-                vuln_id, related_vulnerabilities,
+                vuln_id,
+                related_vulnerabilities,
             )
 
             matches = item["matchDetails"]
@@ -87,11 +92,7 @@ class AnchoreGrypeParser:
             artifact_purl = artifact.get("purl")
             artifact_location = artifact.get("locations")
             file_path = None
-            if (
-                artifact_location
-                and len(artifact_location) > 0
-                and artifact_location[0].get("path")
-            ):
+            if artifact_location and len(artifact_location) > 0 and artifact_location[0].get("path"):
                 file_path = artifact_location[0].get("path")
 
             finding_title = f"{vuln_id} in {artifact_name}:{artifact_version}"
@@ -99,25 +100,17 @@ class AnchoreGrypeParser:
             finding_tags = None
             finding_description = ""
             if vuln_namespace:
-                finding_description += (
-                    f"**Vulnerability Namespace:** {vuln_namespace}"
-                )
+                finding_description += f"**Vulnerability Namespace:** {vuln_namespace}"
             if vuln_description:
-                finding_description += (
-                    f"\n**Vulnerability Description:** {vuln_description}"
-                )
+                finding_description += f"\n**Vulnerability Description:** {vuln_description}"
             if rel_description and rel_description != vuln_description:
                 finding_description += f"\n**Related Vulnerability Description:** {rel_description}"
             if matches:
                 if isinstance(item["matchDetails"], dict):
-                    finding_description += (
-                        f"\n**Matcher:** {matches['matcher']}"
-                    )
+                    finding_description += f"\n**Matcher:** {matches['matcher']}"
                     finding_tags = [matches["matcher"].replace("-matcher", "")]
                 elif len(matches) == 1:
-                    finding_description += (
-                        f"\n**Matcher:** {matches[0]['matcher']}"
-                    )
+                    finding_description += f"\n**Matcher:** {matches[0]['matcher']}"
                     finding_tags = [
                         matches[0]["matcher"].replace("-matcher", ""),
                     ]
@@ -148,30 +141,22 @@ class AnchoreGrypeParser:
 
             finding_references = ""
             if vuln_datasource:
-                finding_references += (
-                    f"**Vulnerability Datasource:** {vuln_datasource}\n"
-                )
+                finding_references += f"**Vulnerability Datasource:** {vuln_datasource}\n"
             if vuln_urls:
                 if len(vuln_urls) == 1:
                     if vuln_urls[0] != vuln_datasource:
-                        finding_references += (
-                            f"**Vulnerability URL:** {vuln_urls[0]}\n"
-                        )
+                        finding_references += f"**Vulnerability URL:** {vuln_urls[0]}\n"
                 else:
                     finding_references += "**Vulnerability URLs:**\n"
                     for url in vuln_urls:
                         if url != vuln_datasource:
                             finding_references += f"- {url}\n"
             if rel_datasource:
-                finding_references += (
-                    f"**Related Vulnerability Datasource:** {rel_datasource}\n"
-                )
+                finding_references += f"**Related Vulnerability Datasource:** {rel_datasource}\n"
             if rel_urls:
                 if len(rel_urls) == 1:
                     if rel_urls[0] != vuln_datasource:
-                        finding_references += (
-                            f"**Related Vulnerability URL:** {rel_urls[0]}\n"
-                        )
+                        finding_references += f"**Related Vulnerability URL:** {rel_urls[0]}\n"
                 else:
                     finding_references += "**Related Vulnerability URLs:**\n"
                     for url in rel_urls:
@@ -194,6 +179,9 @@ class AnchoreGrypeParser:
                 finding_epss_score, finding_epss_percentile = self.get_epss_values(rel_vuln_id, rel_epss)
                 if finding_epss_score is None and rel_vuln_id:
                     finding_epss_score, finding_epss_percentile = self.get_epss_values(vuln_id, vuln_epss)
+
+            if vuln_known_exploited and vulnerability_ids:
+                finding_kev_date = self.get_kev_date(vuln_id, vuln_known_exploited, vulnerability_ids)
 
             if self.mode == "detailed":
                 dupe_key = f"{vuln_id}|{artifact_name}|{artifact_version}|{file_path}"
@@ -221,6 +209,8 @@ class AnchoreGrypeParser:
                     file_path=file_path,
                     fix_available=fix_available,
                     fix_version=fix_version,
+                    kev_date=finding_kev_date,
+                    known_exploited=bool(finding_kev_date),
                 )
 
                 if self.mode == "detailed":
@@ -228,12 +218,57 @@ class AnchoreGrypeParser:
 
                 dupes[dupe_key].unsaved_tags = finding_tags
                 dupes[dupe_key].unsaved_vulnerability_ids = vulnerability_ids
-                if settings.V3_FEATURE_LOCATIONS and artifact_purl:
+                if locations_enabled() and artifact_purl:
                     dupes[dupe_key].unsaved_locations.append(
                         LocationData.dependency(purl=artifact_purl, file_path=file_path),
                     )
 
+        # Only touch unsaved_locations when there is an image to attach: with locations off a
+        # finding has no such attribute until a parser sets it.
+        for finding in dupes.values() if image_locations else []:
+            finding.unsaved_locations.extend(image_locations)
         return list(dupes.values())
+
+    def image_locations(self, source):
+        """
+        The scanned image as Image locations: one per repo digest when Grype recorded
+        them, else the manifest digest with the user's reference, else the reference alone.
+        """
+        if not locations_enabled() or source.get("type") != "image":
+            return []
+        target = source.get("target") or {}
+        tags = [tag for tag in (target.get("tags") or []) if tag]
+        user_input = target.get("userInput") or (tags[0] if tags else "")
+        reference = split_image_reference(user_input)
+        digests = [digest for digest in (target.get("repoDigests") or []) if digest]
+        locations = []
+        seen = set()
+        for digest_reference in digests:
+            parts = split_image_reference(digest_reference)
+            if not parts.get("repository") or parts["digest"] in seen:
+                continue
+            seen.add(parts["digest"])
+            locations.append(
+                LocationData.image(
+                    registry=parts["registry"],
+                    repository=parts["repository"],
+                    digest=parts["digest"],
+                    tag=parts["tag"] or (reference.get("tag", "") if reference.get("repository") == parts["repository"] else ""),
+                ),
+            )
+        if locations:
+            return locations
+        if not reference.get("repository"):
+            return []
+        manifest_digest = target.get("manifestDigest") or ""
+        return [
+            LocationData.image(
+                registry=reference["registry"],
+                repository=reference["repository"],
+                digest=manifest_digest if str(manifest_digest).startswith("sha256:") else "",
+                tag=reference["tag"],
+            ),
+        ]
 
     def _convert_severity(self, val):
         if val in {"Unknown", "Negligible"}:
@@ -246,7 +281,8 @@ class AnchoreGrypeParser:
                 vector = cvss_item["vector"]
                 cvss_objects = cvss_parser.parse_cvss_from_text(vector)
                 if len(cvss_objects) > 0 and isinstance(
-                    cvss_objects[0], CVSS3,
+                    cvss_objects[0],
+                    CVSS3,
                 ):
                     return vector
         return None
@@ -271,13 +307,32 @@ class AnchoreGrypeParser:
         logger.debug("epss not found for vuln_id: %s in epss_list: %s", vuln_id, epss_list)
         return None, None
 
+    def get_kev_date(self, vuln_id, known_exploited_list, vulnerability_ids):
+        if not isinstance(known_exploited_list, list):
+            return None
+
+        for known_exploited_data in known_exploited_list:
+            known_exploited_cve = known_exploited_data.get("cve")
+            if known_exploited_cve in vulnerability_ids:
+                kev_date_str = known_exploited_data.get("dateAdded")
+                if kev_date_str:
+                    try:
+                        return datetime.strptime(kev_date_str, "%Y-%m-%d").date()
+                    except (TypeError, ValueError):
+                        logger.debug("kev_date_str is not a valid date: %s", kev_date_str)
+        logger.debug("kev_date not found for vuln_id: %s", vuln_id)
+        return None
+
     def get_vulnerability_ids(self, vuln_id, related_vulnerabilities):
         vulnerability_ids = []
         if vuln_id:
             vulnerability_ids.append(vuln_id)
         if related_vulnerabilities:
-            vulnerability_ids.extend(related_vulnerability_id for related_vulnerability in related_vulnerabilities
-                if (related_vulnerability_id := related_vulnerability.get("id")))
+            vulnerability_ids.extend(
+                related_vulnerability_id
+                for related_vulnerability in related_vulnerabilities
+                if (related_vulnerability_id := related_vulnerability.get("id"))
+            )
         if vulnerability_ids:
             return vulnerability_ids
         return None

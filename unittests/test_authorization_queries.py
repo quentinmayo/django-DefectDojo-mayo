@@ -8,19 +8,27 @@ for various user permission scenarios.
 from unittest.mock import patch
 
 from django.conf import settings
+from django.urls import reverse
 from django.utils import timezone
 
+from dojo.authorization.models import (
+    Dojo_Group_Member,
+    Global_Role,
+    Product_Group,
+    Product_Member,
+    Product_Type_Group,
+    Product_Type_Member,
+    Role,
+)
 from dojo.authorization.roles_permissions import Permissions
 from dojo.endpoint.queries import get_authorized_endpoint_status, get_authorized_endpoints
 from dojo.engagement.queries import get_authorized_engagements
+from dojo.finding.helper import save_vulnerability_ids
 from dojo.finding.queries import (
     get_authorized_findings,
     get_authorized_findings_for_queryset,
-    get_authorized_stub_findings,
-    get_authorized_vulnerability_ids,
 )
 from dojo.finding_group.queries import get_authorized_finding_groups
-from dojo.group.queries import get_authorized_groups
 from dojo.location.models import LocationFindingReference, LocationProductReference
 from dojo.location.queries import (
     get_authorized_location_finding_reference,
@@ -29,30 +37,23 @@ from dojo.location.queries import (
 )
 from dojo.models import (
     Dojo_Group,
-    Dojo_Group_Member,
     Dojo_User,
     Endpoint,
     Endpoint_Status,
     Engagement,
     Finding,
     Finding_Group,
-    Global_Role,
+    FindingVulnerabilityReference,
     Product,
-    Product_Group,
-    Product_Member,
     Product_Type,
-    Product_Type_Group,
-    Product_Type_Member,
-    Role,
-    Stub_Finding,
     Test,
     Test_Type,
-    Vulnerability_Id,
 )
 from dojo.product.queries import get_authorized_products
 from dojo.product_type.queries import get_authorized_product_types
 from dojo.test.queries import get_authorized_tests
 from dojo.url.models import URL
+from dojo.vulnerability.queries import get_authorized_finding_vulnerability_references
 
 from .dojo_test_case import DojoTestCase, skip_unless_v2, skip_unless_v3
 
@@ -167,6 +168,15 @@ class AuthorizationQueriesTestBase(DojoTestCase):
             defaults={"role": cls.reader_role},
         )
 
+        # Legacy authorization: the RBAC member tables above are inert under
+        # the post-Track-B authorization layer. Mirror the per-user grants
+        # into authorized_users so the legacy queryset filters return the
+        # same set of products/findings/etc. for the directly-named users.
+        # Group memberships and Global_Role do NOT translate to legacy
+        # semantics — those tests assert empty results below.
+        cls.product_1.authorized_users.add(cls.user_product_member)
+        cls.product_type_1.authorized_users.add(cls.user_product_type_member)
+
         # Create test type
         cls.test_type, _ = Test_Type.objects.get_or_create(name="Auth Test Type")
 
@@ -230,32 +240,19 @@ class AuthorizationQueriesTestBase(DojoTestCase):
             },
         )
 
-        # Create stub findings - reporter is required
-        cls.stub_finding_1, _ = Stub_Finding.objects.get_or_create(
-            test=cls.test_1,
-            title="Auth Test Stub Finding 1",
-            defaults={
-                "severity": "High",
-                "reporter": cls.superuser,
-            },
-        )
-        cls.stub_finding_2, _ = Stub_Finding.objects.get_or_create(
-            test=cls.test_2,
-            title="Auth Test Stub Finding 2",
-            defaults={
-                "severity": "Medium",
-                "reporter": cls.superuser,
-            },
-        )
-
-        # Create vulnerability IDs
-        cls.vuln_id_1, _ = Vulnerability_Id.objects.get_or_create(
+        # Create vulnerability IDs (entity + ordered reference rows) and grab the
+        # reference objects used later in the authorized-queryset assertions.
+        save_vulnerability_ids(cls.finding_1, ["CVE-2024-0001"])
+        cls.finding_1.save()
+        cls.vuln_id_1 = FindingVulnerabilityReference.objects.get(
             finding=cls.finding_1,
-            vulnerability_id="CVE-2024-0001",
+            vulnerability__vulnerability_id="CVE-2024-0001",
         )
-        cls.vuln_id_2, _ = Vulnerability_Id.objects.get_or_create(
+        save_vulnerability_ids(cls.finding_2, ["CVE-2024-0002"])
+        cls.finding_2.save()
+        cls.vuln_id_2 = FindingVulnerabilityReference.objects.get(
             finding=cls.finding_2,
-            vulnerability_id="CVE-2024-0002",
+            vulnerability__vulnerability_id="CVE-2024-0002",
         )
 
         if settings.V3_FEATURE_LOCATIONS:
@@ -321,11 +318,14 @@ class TestGetAuthorizedFindings(AuthorizationQueriesTestBase):
         self.assertNotIn(self.finding_1, findings)
         self.assertNotIn(self.finding_2, findings)
 
-    def test_user_global_reader_gets_all(self):
-        """User with global reader role should get all findings"""
+    def test_user_global_reader_gets_nothing_legacy(self):
+        """
+        Legacy: Global_Role(role=Reader) is inert. The user has no
+        authorized_users membership, isn't staff, isn't superuser — sees nothing.
+        """
         findings = get_authorized_findings(Permissions.Finding_View, user=self.user_global_reader)
-        self.assertIn(self.finding_1, findings)
-        self.assertIn(self.finding_2, findings)
+        self.assertNotIn(self.finding_1, findings)
+        self.assertNotIn(self.finding_2, findings)
 
     def test_user_product_member_gets_product_findings(self):
         """User with product membership should get only that product's findings"""
@@ -339,16 +339,19 @@ class TestGetAuthorizedFindings(AuthorizationQueriesTestBase):
         self.assertIn(self.finding_1, findings)
         self.assertNotIn(self.finding_2, findings)
 
-    def test_user_group_product_member_gets_group_findings(self):
-        """User in group with product access should get those findings"""
+    def test_user_group_product_member_gets_nothing_legacy(self):
+        """
+        Legacy: Product_Group grants don't translate to legacy.
+        Group memberships are inert; user sees nothing.
+        """
         findings = get_authorized_findings(Permissions.Finding_View, user=self.user_group_product_member)
-        self.assertIn(self.finding_1, findings)
+        self.assertNotIn(self.finding_1, findings)
         self.assertNotIn(self.finding_2, findings)
 
-    def test_user_group_product_type_member_gets_group_findings(self):
-        """User in group with product type access should get those findings"""
+    def test_user_group_product_type_member_gets_nothing_legacy(self):
+        """Legacy: Product_Type_Group grants are inert."""
         findings = get_authorized_findings(Permissions.Finding_View, user=self.user_group_product_type_member)
-        self.assertIn(self.finding_1, findings)
+        self.assertNotIn(self.finding_1, findings)
         self.assertNotIn(self.finding_2, findings)
 
     def test_queryset_parameter_filters_correctly(self):
@@ -360,59 +363,32 @@ class TestGetAuthorizedFindings(AuthorizationQueriesTestBase):
 
     def test_none_user_returns_empty(self):
         """None user should return empty queryset"""
-        with patch("dojo.finding.queries.get_current_user", return_value=None):
+        with patch("dojo.authorization.query_registrations.get_current_user", return_value=None):
             findings = get_authorized_findings(Permissions.Finding_View)
             self.assertEqual(findings.count(), 0)
 
 
-class TestGetAuthorizedStubFindings(AuthorizationQueriesTestBase):
-
-    """Tests for get_authorized_stub_findings() - uses get_current_user()"""
-
-    @patch("dojo.finding.queries.get_current_user")
-    def test_superuser_gets_all_stub_findings(self, mock_get_current_user):
-        """Superuser should get all stub findings"""
-        mock_get_current_user.return_value = self.superuser
-        stub_findings = get_authorized_stub_findings(Permissions.Finding_View)
-        self.assertIn(self.stub_finding_1, stub_findings)
-        self.assertIn(self.stub_finding_2, stub_findings)
-
-    @patch("dojo.finding.queries.get_current_user")
-    def test_user_no_permissions_gets_empty(self, mock_get_current_user):
-        """User with no permissions should not get test stub findings"""
-        mock_get_current_user.return_value = self.user_no_perms
-        stub_findings = get_authorized_stub_findings(Permissions.Finding_View)
-        self.assertNotIn(self.stub_finding_1, stub_findings)
-        self.assertNotIn(self.stub_finding_2, stub_findings)
-
-    @patch("dojo.finding.queries.get_current_user")
-    def test_user_product_member_gets_product_stub_findings(self, mock_get_current_user):
-        """User with product membership should get only that product's stub findings"""
-        mock_get_current_user.return_value = self.user_product_member
-        stub_findings = get_authorized_stub_findings(Permissions.Finding_View)
-        self.assertIn(self.stub_finding_1, stub_findings)
-        self.assertNotIn(self.stub_finding_2, stub_findings)
-
-
 class TestGetAuthorizedVulnerabilityIds(AuthorizationQueriesTestBase):
 
-    """Tests for get_authorized_vulnerability_ids()"""
+    """Tests for get_authorized_finding_vulnerability_references()"""
 
     def test_superuser_gets_all_vulnerability_ids(self):
-        """Superuser should get all vulnerability IDs"""
-        vuln_ids = get_authorized_vulnerability_ids(Permissions.Finding_View, user=self.superuser)
+        """Superuser should get all vulnerability id references"""
+        vuln_ids = get_authorized_finding_vulnerability_references(Permissions.Finding_View, user=self.superuser)
         self.assertIn(self.vuln_id_1, vuln_ids)
         self.assertIn(self.vuln_id_2, vuln_ids)
 
     def test_user_no_permissions_gets_empty(self):
-        """User with no permissions should not get test vulnerability IDs"""
-        vuln_ids = get_authorized_vulnerability_ids(Permissions.Finding_View, user=self.user_no_perms)
+        """User with no permissions should not get test vulnerability id references"""
+        vuln_ids = get_authorized_finding_vulnerability_references(Permissions.Finding_View, user=self.user_no_perms)
         self.assertNotIn(self.vuln_id_1, vuln_ids)
         self.assertNotIn(self.vuln_id_2, vuln_ids)
 
     def test_user_product_member_gets_product_vulnerability_ids(self):
-        """User with product membership should get only that product's vulnerability IDs"""
-        vuln_ids = get_authorized_vulnerability_ids(Permissions.Finding_View, user=self.user_product_member)
+        """User with product membership should get only that product's vulnerability id references"""
+        vuln_ids = get_authorized_finding_vulnerability_references(
+            Permissions.Finding_View, user=self.user_product_member,
+        )
         self.assertIn(self.vuln_id_1, vuln_ids)
         self.assertNotIn(self.vuln_id_2, vuln_ids)
 
@@ -433,11 +409,11 @@ class TestGetAuthorizedProducts(AuthorizationQueriesTestBase):
         self.assertNotIn(self.product_1, products)
         self.assertNotIn(self.product_2, products)
 
-    def test_user_global_reader_gets_all(self):
-        """User with global reader role should get all products"""
+    def test_user_global_reader_gets_nothing_legacy(self):
+        """Legacy: Global_Role(role=Reader) is inert."""
         products = get_authorized_products(Permissions.Product_View, user=self.user_global_reader)
-        self.assertIn(self.product_1, products)
-        self.assertIn(self.product_2, products)
+        self.assertNotIn(self.product_1, products)
+        self.assertNotIn(self.product_2, products)
 
     def test_user_product_member_gets_own_products(self):
         """User with product membership should get only that product"""
@@ -451,16 +427,16 @@ class TestGetAuthorizedProducts(AuthorizationQueriesTestBase):
         self.assertIn(self.product_1, products)
         self.assertNotIn(self.product_2, products)
 
-    def test_user_group_product_member_gets_group_products(self):
-        """User in group with product access should get those products"""
+    def test_user_group_product_member_gets_nothing_legacy(self):
+        """Legacy: Product_Group grants are inert."""
         products = get_authorized_products(Permissions.Product_View, user=self.user_group_product_member)
-        self.assertIn(self.product_1, products)
+        self.assertNotIn(self.product_1, products)
         self.assertNotIn(self.product_2, products)
 
-    def test_user_group_product_type_member_gets_group_products(self):
-        """User in group with product type access should get products in that type"""
+    def test_user_group_product_type_member_gets_nothing_legacy(self):
+        """Legacy: Product_Type_Group grants are inert."""
         products = get_authorized_products(Permissions.Product_View, user=self.user_group_product_type_member)
-        self.assertIn(self.product_1, products)
+        self.assertNotIn(self.product_1, products)
         self.assertNotIn(self.product_2, products)
 
 
@@ -468,7 +444,7 @@ class TestGetAuthorizedProductTypes(AuthorizationQueriesTestBase):
 
     """Tests for get_authorized_product_types() - uses get_current_user()"""
 
-    @patch("dojo.product_type.queries.get_current_user")
+    @patch("dojo.authorization.query_registrations.get_current_user")
     def test_superuser_gets_all_product_types(self, mock_get_current_user):
         """Superuser should get all product types"""
         mock_get_current_user.return_value = self.superuser
@@ -476,7 +452,7 @@ class TestGetAuthorizedProductTypes(AuthorizationQueriesTestBase):
         self.assertIn(self.product_type_1, product_types)
         self.assertIn(self.product_type_2, product_types)
 
-    @patch("dojo.product_type.queries.get_current_user")
+    @patch("dojo.authorization.query_registrations.get_current_user")
     def test_user_no_permissions_gets_empty(self, mock_get_current_user):
         """User with no permissions should not get test product types"""
         mock_get_current_user.return_value = self.user_no_perms
@@ -484,15 +460,15 @@ class TestGetAuthorizedProductTypes(AuthorizationQueriesTestBase):
         self.assertNotIn(self.product_type_1, product_types)
         self.assertNotIn(self.product_type_2, product_types)
 
-    @patch("dojo.product_type.queries.get_current_user")
-    def test_user_global_reader_gets_all(self, mock_get_current_user):
-        """User with global reader role should get all product types"""
+    @patch("dojo.authorization.query_registrations.get_current_user")
+    def test_user_global_reader_gets_nothing_legacy(self, mock_get_current_user):
+        """Legacy: Global_Role(role=Reader) is inert."""
         mock_get_current_user.return_value = self.user_global_reader
         product_types = get_authorized_product_types(Permissions.Product_Type_View)
-        self.assertIn(self.product_type_1, product_types)
-        self.assertIn(self.product_type_2, product_types)
+        self.assertNotIn(self.product_type_1, product_types)
+        self.assertNotIn(self.product_type_2, product_types)
 
-    @patch("dojo.product_type.queries.get_current_user")
+    @patch("dojo.authorization.query_registrations.get_current_user")
     def test_user_product_type_member_gets_own_types(self, mock_get_current_user):
         """User with product type membership should get only that type"""
         mock_get_current_user.return_value = self.user_product_type_member
@@ -500,12 +476,12 @@ class TestGetAuthorizedProductTypes(AuthorizationQueriesTestBase):
         self.assertIn(self.product_type_1, product_types)
         self.assertNotIn(self.product_type_2, product_types)
 
-    @patch("dojo.product_type.queries.get_current_user")
-    def test_user_group_product_type_member_gets_group_types(self, mock_get_current_user):
-        """User in group with product type access should get that type"""
+    @patch("dojo.authorization.query_registrations.get_current_user")
+    def test_user_group_product_type_member_gets_nothing_legacy(self, mock_get_current_user):
+        """Legacy: Product_Type_Group grants are inert."""
         mock_get_current_user.return_value = self.user_group_product_type_member
         product_types = get_authorized_product_types(Permissions.Product_Type_View)
-        self.assertIn(self.product_type_1, product_types)
+        self.assertNotIn(self.product_type_1, product_types)
         self.assertNotIn(self.product_type_2, product_types)
 
 
@@ -513,7 +489,7 @@ class TestGetAuthorizedEngagements(AuthorizationQueriesTestBase):
 
     """Tests for get_authorized_engagements() - uses get_current_user()"""
 
-    @patch("dojo.engagement.queries.get_current_user")
+    @patch("dojo.authorization.query_registrations.get_current_user")
     def test_superuser_gets_all_engagements(self, mock_get_current_user):
         """Superuser should get all engagements"""
         mock_get_current_user.return_value = self.superuser
@@ -521,7 +497,7 @@ class TestGetAuthorizedEngagements(AuthorizationQueriesTestBase):
         self.assertIn(self.engagement_1, engagements)
         self.assertIn(self.engagement_2, engagements)
 
-    @patch("dojo.engagement.queries.get_current_user")
+    @patch("dojo.authorization.query_registrations.get_current_user")
     def test_user_no_permissions_gets_empty(self, mock_get_current_user):
         """User with no permissions should not get test engagements"""
         mock_get_current_user.return_value = self.user_no_perms
@@ -529,15 +505,15 @@ class TestGetAuthorizedEngagements(AuthorizationQueriesTestBase):
         self.assertNotIn(self.engagement_1, engagements)
         self.assertNotIn(self.engagement_2, engagements)
 
-    @patch("dojo.engagement.queries.get_current_user")
-    def test_user_global_reader_gets_all(self, mock_get_current_user):
-        """User with global reader role should get all engagements"""
+    @patch("dojo.authorization.query_registrations.get_current_user")
+    def test_user_global_reader_gets_nothing_legacy(self, mock_get_current_user):
+        """Legacy: Global_Role(role=Reader) is inert."""
         mock_get_current_user.return_value = self.user_global_reader
         engagements = get_authorized_engagements(Permissions.Engagement_View)
-        self.assertIn(self.engagement_1, engagements)
-        self.assertIn(self.engagement_2, engagements)
+        self.assertNotIn(self.engagement_1, engagements)
+        self.assertNotIn(self.engagement_2, engagements)
 
-    @patch("dojo.engagement.queries.get_current_user")
+    @patch("dojo.authorization.query_registrations.get_current_user")
     def test_user_product_member_gets_product_engagements(self, mock_get_current_user):
         """User with product membership should get only that product's engagements"""
         mock_get_current_user.return_value = self.user_product_member
@@ -545,7 +521,7 @@ class TestGetAuthorizedEngagements(AuthorizationQueriesTestBase):
         self.assertIn(self.engagement_1, engagements)
         self.assertNotIn(self.engagement_2, engagements)
 
-    @patch("dojo.engagement.queries.get_current_user")
+    @patch("dojo.authorization.query_registrations.get_current_user")
     def test_user_product_type_member_gets_product_type_engagements(self, mock_get_current_user):
         """User with product type membership should get engagements in that type"""
         mock_get_current_user.return_value = self.user_product_type_member
@@ -558,7 +534,7 @@ class TestGetAuthorizedTests(AuthorizationQueriesTestBase):
 
     """Tests for get_authorized_tests() - uses get_current_user()"""
 
-    @patch("dojo.test.queries.get_current_user")
+    @patch("dojo.authorization.query_registrations.get_current_user")
     def test_superuser_gets_all_tests(self, mock_get_current_user):
         """Superuser should get all tests"""
         mock_get_current_user.return_value = self.superuser
@@ -566,7 +542,7 @@ class TestGetAuthorizedTests(AuthorizationQueriesTestBase):
         self.assertIn(self.test_1, tests)
         self.assertIn(self.test_2, tests)
 
-    @patch("dojo.test.queries.get_current_user")
+    @patch("dojo.authorization.query_registrations.get_current_user")
     def test_user_no_permissions_gets_empty(self, mock_get_current_user):
         """User with no permissions should not get test tests"""
         mock_get_current_user.return_value = self.user_no_perms
@@ -574,7 +550,7 @@ class TestGetAuthorizedTests(AuthorizationQueriesTestBase):
         self.assertNotIn(self.test_1, tests)
         self.assertNotIn(self.test_2, tests)
 
-    @patch("dojo.test.queries.get_current_user")
+    @patch("dojo.authorization.query_registrations.get_current_user")
     def test_user_product_member_gets_product_tests(self, mock_get_current_user):
         """User with product membership should get only that product's tests"""
         mock_get_current_user.return_value = self.user_product_member
@@ -705,26 +681,6 @@ class TestGetAuthorizedEndpointStatus(AuthorizationQueriesTestBase):
         self.assertNotIn(self.endpoint_status_2, endpoint_statuses)
 
 
-class TestGetAuthorizedGroups(AuthorizationQueriesTestBase):
-
-    """Tests for get_authorized_groups() - uses get_current_user()"""
-
-    @patch("dojo.group.queries.get_current_user")
-    def test_superuser_gets_all_groups(self, mock_get_current_user):
-        """Superuser should get all groups"""
-        mock_get_current_user.return_value = self.superuser
-        groups = get_authorized_groups(Permissions.Group_View)
-        self.assertIn(self.group_product, groups)
-        self.assertIn(self.group_product_type, groups)
-
-    @patch("dojo.group.queries.get_current_user")
-    def test_user_group_member_gets_own_groups(self, mock_get_current_user):
-        """User who is a group member should get that group"""
-        mock_get_current_user.return_value = self.user_group_product_member
-        groups = get_authorized_groups(Permissions.Group_View)
-        self.assertIn(self.group_product, groups)
-
-
 class TestGetAuthorizedFindingGroups(AuthorizationQueriesTestBase):
 
     """Tests for get_authorized_finding_groups()"""
@@ -743,6 +699,20 @@ class TestGetAuthorizedFindingGroups(AuthorizationQueriesTestBase):
             test=cls.test_2,
             defaults={"creator": cls.superuser},
         )
+        cls.finding_group_1.findings.clear()
+        cls.finding_group_2.findings.clear()
+        cls.open_finding_group_1, _ = Finding_Group.objects.get_or_create(
+            name="Auth Test Open Finding Group 1",
+            test=cls.test_1,
+            defaults={"creator": cls.superuser},
+        )
+        cls.open_finding_group_1.findings.set([cls.finding_1])
+        cls.open_finding_group_2, _ = Finding_Group.objects.get_or_create(
+            name="Auth Test Open Finding Group 2",
+            test=cls.test_2,
+            defaults={"creator": cls.superuser},
+        )
+        cls.open_finding_group_2.findings.set([cls.finding_2])
 
     def test_superuser_gets_all_finding_groups(self):
         """Superuser should get all finding groups"""
@@ -760,6 +730,83 @@ class TestGetAuthorizedFindingGroups(AuthorizationQueriesTestBase):
         """User with product membership should get only that product's finding groups"""
         finding_groups = get_authorized_finding_groups(Permissions.Finding_Group_View, user=self.user_product_member)
         self.assertIn(self.finding_group_1, finding_groups)
+        self.assertNotIn(self.finding_group_2, finding_groups)
+
+    def _listed_finding_groups(self, user, view_name="all_finding_groups", query=None):
+        self.client.force_login(user)
+        response = self.client.get(reverse(view_name), query or {})
+        self.assertEqual(response.status_code, 200)
+        return list(response.context["finding_groups"].object_list)
+
+    def test_superuser_sees_all_finding_groups_in_list(self):
+        finding_groups = self._listed_finding_groups(self.superuser)
+        self.assertIn(self.finding_group_1, finding_groups)
+        self.assertIn(self.finding_group_2, finding_groups)
+
+    def test_product_member_sees_authorized_finding_groups_in_list(self):
+        finding_groups = self._listed_finding_groups(self.user_product_member)
+        self.assertIn(self.finding_group_1, finding_groups)
+        self.assertNotIn(self.finding_group_2, finding_groups)
+
+    def test_user_without_permissions_sees_no_finding_groups_in_list(self):
+        finding_groups = self._listed_finding_groups(self.user_no_perms)
+        self.assertNotIn(self.finding_group_1, finding_groups)
+        self.assertNotIn(self.finding_group_2, finding_groups)
+
+    def test_product_filter_includes_authorized_finding_group_without_findings(self):
+        finding_groups = self._listed_finding_groups(
+            self.user_product_member,
+            query={"product": self.product_1.id},
+        )
+        self.assertIn(self.finding_group_1, finding_groups)
+        self.assertNotIn(self.finding_group_2, finding_groups)
+
+    def test_engagement_filter_includes_authorized_finding_group_without_findings(self):
+        finding_groups = self._listed_finding_groups(
+            self.user_product_member,
+            query={"engagement": self.engagement_1.id},
+        )
+        self.assertIn(self.finding_group_1, finding_groups)
+        self.assertNotIn(self.finding_group_2, finding_groups)
+
+    def test_product_filter_excludes_unauthorized_finding_groups(self):
+        finding_groups = self._listed_finding_groups(
+            self.user_no_perms,
+            query={"product": self.product_1.id},
+        )
+        self.assertNotIn(self.finding_group_1, finding_groups)
+        self.assertNotIn(self.finding_group_2, finding_groups)
+
+    def test_engagement_filter_excludes_unauthorized_finding_groups(self):
+        finding_groups = self._listed_finding_groups(
+            self.user_no_perms,
+            query={"engagement": self.engagement_1.id},
+        )
+        self.assertNotIn(self.finding_group_1, finding_groups)
+        self.assertNotIn(self.finding_group_2, finding_groups)
+
+    def test_product_member_sees_authorized_open_finding_group(self):
+        finding_groups = self._listed_finding_groups(self.user_product_member, "open_finding_groups")
+        self.assertIn(self.open_finding_group_1, finding_groups)
+
+    def test_user_without_permissions_sees_no_open_finding_groups(self):
+        finding_groups = self._listed_finding_groups(self.user_no_perms, "open_finding_groups")
+        self.assertNotIn(self.open_finding_group_1, finding_groups)
+
+    def test_product_member_does_not_see_cross_product_open_finding_group(self):
+        finding_groups = self._listed_finding_groups(self.user_product_member, "open_finding_groups")
+        self.assertNotIn(self.open_finding_group_2, finding_groups)
+
+    def test_product_member_sees_authorized_closed_finding_group(self):
+        finding_groups = self._listed_finding_groups(self.user_product_member, "closed_finding_groups")
+        self.assertIn(self.finding_group_1, finding_groups)
+
+    def test_user_without_permissions_sees_no_closed_finding_groups(self):
+        finding_groups = self._listed_finding_groups(self.user_no_perms, "closed_finding_groups")
+        self.assertNotIn(self.finding_group_1, finding_groups)
+
+    def test_product_member_does_not_see_cross_product_closed_finding_group(self):
+        finding_groups = self._listed_finding_groups(self.user_product_member, "closed_finding_groups")
         self.assertNotIn(self.finding_group_2, finding_groups)
 
 

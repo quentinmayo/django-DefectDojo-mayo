@@ -1,4 +1,6 @@
 {% extends "base.html" %}
+{% load filter_tags %}
+{% load i18n %}
 {% load navigation_tags %}
 {% load display_tags %}
 {% load authorization_tags %}
@@ -10,11 +12,11 @@
             <div class="panel panel-default">
                 <div class="panel-heading tight">
                     <h3 class="has-filters">
-                        {{ view }} Engagements
+                        <i class="fa-solid fa-inbox dd-card-icon" aria-hidden="true"></i>{{ view }} Engagements
                         <div class="dropdown pull-right">
                             &nbsp;
                             <button class="btn btn-primary dropdown-toggle" type="button" id="downloadMenu"
-                                    data-toggle="dropdown" aria-expanded="true" aria-label="download">
+                                    data-toggle="dropdown" aria-expanded="true" aria-label="{% trans 'download' %}">
                                 <span class="fa-solid fa-download"></span>
                                 <span class="caret"></span>
                             </button>
@@ -30,11 +32,11 @@
                                 </a>
                             </li>
                             </ul>
-                            <button id="show-filters" aria-label="Filters" data-toggle="collapse" data-target="#the-filters" class="btn btn-primary toggle-filters"> <i class="fa-solid fa-filter"></i> <i class="caret"></i> </button>
+                            <button id="show-filters" aria-label="{% trans 'Filters' %}" data-toggle="collapse" data-target="#the-filters" class="btn btn-primary toggle-filters"> <i class="fa-solid fa-filter"></i> <i class="caret"></i> </button>
                         </div>
                     </h3>
                 </div>
-                <div id="the-filters" class="is-filters panel-body collapse {% if filter_form.has_changed %}in{% endif %}">
+                <div id="the-filters" class="is-filters panel-body collapse {% if filter_form|has_active_filters %}in{% endif %}">
                     {% include "dojo/filter_snippet.html" with form=filter_form %}
                 </div>
             </div>
@@ -71,13 +73,13 @@
                                 <td class="nowrap">
                                     <div class="align-top">
                                         <div class="dropdown">
-                                            <a href="#" aria-label="More engagement options" class="dropdown-toggle pull-left" data-toggle="dropdown" id="dropdownMenuToggle" role="button">&nbsp;<i class="fa-solid fa-ellipsis-vertical"></i>&nbsp;</a>
+                                            <a href="#" aria-label="{% trans 'More engagement options' %}" class="dropdown-toggle pull-left" data-toggle="dropdown" id="dropdownMenuToggle" role="button">&nbsp;<i class="fa-solid fa-ellipsis-vertical"></i>&nbsp;</a>
                                             <ul aria-labelledby="dropdownMenuToggle" class="dropdown-menu" role="menu">
                                                 <li role="presentation">
                                                     <a class="" href="{% url 'view_engagement' e.id %}" role="menuitem">
                                                         <i class="fa-solid fa-rectangle-list"></i> View
                                                 </li>
-                                                {% if e|has_object_permission:"Engagement_Edit" %}
+                                                {% if e|has_object_permission:"edit" %}
                                                 <li role="presentation">
                                                     <a class="" href="{% url 'edit_engagement' e.id %}" role="menuitem">
                                                         <i class="fa-solid fa-pen-to-square"></i> Edit
@@ -85,14 +87,14 @@
                                                 </li>
                                                 <li class="divider" role="separator"></li>
                                                 {% endif %}
-                                                {% if e|has_object_permission:"Test_Add" %}
+                                                {% if e|has_object_permission:"add" %}
                                                 <li role="presentation">
                                                     <a class="" href="{% url 'add_tests' e.id %}" role="menuitem">
                                                         <i class="fa-solid fa-plus"></i> Add Tests
                                                     </a>
                                                 </li>
                                                 {% endif %}
-                                                {% if e|has_object_permission:"Import_Scan_Result" %}
+                                                {% if e|has_object_permission:"import" %}
                                                 <li role="presentation">
                                                     <a class="" href="{% url 'import_scan_results' e.id %}" role="menuitem">
                                                         <i class="fa-solid fa-upload"></i> Import Scan Results
@@ -131,7 +133,7 @@
                                                         <i class="fa-solid fa-file-lines"></i> Engagement Report
                                                     </a>
                                                 </li>
-                                                {% if e|has_object_permission:"Engagement_Delete" %}
+                                                {% if e|has_object_permission:"delete" %}
                                                 <li class="divider" role="separator"></li>
                                                 <li role="presentation">
                                                     <a class="text-danger" href="{% url 'delete_engagement' e.id %}" role="menuitem">

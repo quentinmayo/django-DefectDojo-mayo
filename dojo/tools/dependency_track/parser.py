@@ -1,9 +1,11 @@
+import contextlib
 import json
 import logging
 
 from dateutil import parser
-from django.conf import settings
+from packaging.version import InvalidVersion, Version
 
+from dojo.location.feature import locations_enabled
 from dojo.models import Finding
 from dojo.tools.locations import LocationData
 from dojo.utils import parse_cvss_data
@@ -12,106 +14,6 @@ logger = logging.getLogger(__name__)
 
 
 class DependencyTrackParser:
-
-    r"""
-    A class that can be used to parse the JSON Finding Packaging Format (FPF) export from OWASP Dependency Track.
-
-    See here for more info on this JSON format: https://docs.dependencytrack.org/integrations/file-formats/
-
-    A typical Finding Packaging Format (FPF) export looks like the following:
-
-    {
-      "version": "1.3",
-      "meta" : {
-        "application": "Dependency-Track",
-        "version": "4.5.0",
-        "timestamp": "2022-02-18T23:31:42Z",
-        "baseUrl": "http://dtrack.example.org"
-      },
-      "project" : {
-        "uuid": "ca4f2da9-0fad-4a13-92d7-f627f3168a56",
-        "name": "Acme Example",
-        "version": "1.0",
-        "description": "A sample application"
-      },
-      "findings" : [
-      {
-        "component": {
-          "uuid": "b815b581-fec1-4374-a871-68862a8f8d52",
-          "name": "timespan",
-          "version": "2.3.0",
-          "purl": "pkg:npm/timespan@2.3.0",
-          "latestVersion": "3.2.0"
-        },
-        "vulnerability": {
-          "uuid": "115b80bb-46c4-41d1-9f10-8a175d4abb46",
-          "source": "NPM",
-          "vulnId": "533",
-          "title": "Regular Expression Denial of Service",
-          "subtitle": "timespan",
-          "severity": "LOW",
-          "severityRank": 3,
-          "cvssV2Vector": "CVSS:2.0/AV:N/AC:L/Au:N/C:P/I:P/A:P",
-          "cvssV3Vector": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
-          "cvssV4Vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N",
-          "references": "* [https://example.com](https://example.com)\n* [https://example.org](https://example.org)",
-          "published": "2025-07-11 03:16:03.563",
-          "cweId": 400,
-          "cweName": "Uncontrolled Resource Consumption ('Resource Exhaustion')",
-          "cwes": [
-            {
-              "cweId": 400,
-              "name": "Uncontrolled Resource Consumption ('Resource Exhaustion')"
-            }
-          ],
-          "description": "Affected versions of `timespan`...",
-          "recommendation": "No direct patch is available..."
-        },
-        "analysis": {
-          "state": "NOT_SET",
-          "isSuppressed": false
-        },
-        "matrix": "ca4f2da9-0fad-4a13-92d7-f627f3168a56:b815b581-fec1-4374-a871-68862a8f8d52:115b80bb-46c4-41d1-9f10-8a175d4abb46"
-      },
-      {
-        "component": {
-          "uuid": "979f87f5-eaf5-4095-9d38-cde17bf9228e",
-          "name": "uglify-js",
-          "version": "2.4.24",
-          "purl": "pkg:npm/uglify-js@2.4.24"
-        },
-        "vulnerability": {
-          "uuid": "701a3953-666b-4b7a-96ca-e1e6a3e1def3",
-          "source": "NPM",
-          "vulnId": "48",
-          "aliases": [
-            {
-              "cveId": "CVE-2022-2053",
-              "ghsaId": "GHSA-95rf-557x-44g5"
-            }
-          ],
-          "title": "Regular Expression Denial of Service",
-          "subtitle": "uglify-js",
-          "severity": "LOW",
-          "severityRank": 3,
-          "cweId": 400,
-          "cweName": "Uncontrolled Resource Consumption ('Resource Exhaustion')",
-          "cwes": [
-            {
-              "cweId": 400,
-              "name": "Uncontrolled Resource Consumption ('Resource Exhaustion')"
-            }
-          ],
-          "description": "Versions of `uglify-js` prior to...",
-          "recommendation": "Update to version 2.6.0 or later."
-        },
-        "analysis": {
-          "isSuppressed": false
-        },
-        "matrix": "ca4f2da9-0fad-4a13-92d7-f627f3168a56:979f87f5-eaf5-4095-9d38-cde17bf9228e:701a3953-666b-4b7a-96ca-e1e6a3e1def3"
-      }]
-    }
-    """
 
     def _convert_dependency_track_severity_to_dojo_severity(self, dependency_track_severity):
         """
@@ -131,6 +33,74 @@ class DependencyTrackParser:
         if severity.startswith("info"):
             return "Informational"
         return None
+
+    def _component_version_in_range(self, component_version, affected_range):
+        bound_fields = ("versionStartIncluding", "versionStartExcluding", "versionEndIncluding", "versionEndExcluding")
+        if all(affected_range.get(field) is None for field in bound_fields):
+            # No range bounds (for example an exact-version entry): it describes no band,
+            # so it cannot be said to contain a version.
+            return False
+        try:
+            version_start_including = affected_range.get("versionStartIncluding")
+            if version_start_including is not None and component_version < Version(version_start_including):
+                return False
+            version_start_excluding = affected_range.get("versionStartExcluding")
+            if version_start_excluding is not None and component_version <= Version(version_start_excluding):
+                return False
+            version_end_including = affected_range.get("versionEndIncluding")
+            if version_end_including is not None and component_version > Version(version_end_including):
+                return False
+            version_end_excluding = affected_range.get("versionEndExcluding")
+            if version_end_excluding is not None and component_version >= Version(version_end_excluding):
+                return False
+        except InvalidVersion:
+            return False
+        return True
+
+    def _build_message(self, chosen_range):
+        version_end_excluding = chosen_range.get("versionEndExcluding")
+        if version_end_excluding is not None:
+            return f"Upgrade to {version_end_excluding} or later"
+        version_end_including = chosen_range.get("versionEndIncluding")
+        if version_end_including is not None:
+            return f"Upgrade to a version after {version_end_including}"
+        return None
+
+    def _derive_mitigation_from_affected_versions(self, dependency_track_finding):
+        affected_versions = dependency_track_finding["vulnerability"].get("affectedVersions")
+        if not affected_versions:
+            return None
+        component = dependency_track_finding.get("component", {})
+        purl = component.get("purl")
+        if purl is None:
+            return None
+        component_version = None
+        component_version_string = component.get("version")
+        if component_version_string is not None:
+            with contextlib.suppress(InvalidVersion):
+                component_version = Version(component_version_string)
+        clean_purl = purl.rsplit("@", 1)[0]
+        filtered_affected_ranges = [
+            entry
+            for entry in affected_versions
+            if entry.get("identityType") == "PURL" and entry.get("identity") == clean_purl
+        ]
+        if not filtered_affected_ranges:
+            return None
+        chosen_range = None
+        if component_version is None:
+            # Without a comparable version we cannot choose between ranges; only a lone
+            # range is unambiguous enough to act on.
+            if len(filtered_affected_ranges) == 1:
+                chosen_range = filtered_affected_ranges[0]
+        else:
+            for affected_range in filtered_affected_ranges:
+                if self._component_version_in_range(component_version, affected_range):
+                    chosen_range = affected_range
+                    break
+        if chosen_range is None:
+            return None
+        return self._build_message(chosen_range)
 
     def _convert_dependency_track_finding_to_dojo_finding(self, dependency_track_finding, test):
         """
@@ -171,23 +141,18 @@ class DependencyTrackParser:
 
         title = f"{component_name}:{version_description} affected by: {vuln_id} ({source})"
 
-        # We should collect all the vulnerability ids, the FPF format can add additional IDs as aliases
-        # we add these aliases in the vulnerability_id list making sure duplicate findings get correctly deduplicated
-        # older version of Dependency-track might not include these field therefore lets check first
-        if dependency_track_finding["vulnerability"].get("aliases"):
-            # There can be multiple alias entries
-            set_of_ids = set()
-            set_of_sources = {"cveId", "sonatypeId", "ghsaId", "osvId", "snykId", "gsdId", "vulnDbId"}
-            for alias in dependency_track_finding["vulnerability"]["aliases"]:
-                for source in set_of_sources:
-                    if source in alias:
-                        set_of_ids.add(alias[source])
-            vulnerability_id = list(set_of_ids)
-        else:
-            # The vulnId is not always a CVE (e.g. if the vulnerability is not from the NVD source)
-            # So here we set the cve for the DefectDojo finding to null unless the source of the
-            # Dependency Track vulnerability is NVD
-            vulnerability_id = [vuln_id] if source is not None and source.upper() == "NVD" else None
+        # Collect all vulnerability IDs: vulnId itself plus any aliases.
+        # vuln_id is kept first because the first entry becomes the finding's primary
+        # vulnerability id (its `cve`), and the aliases are sorted: they are collected in a set,
+        # so emitting them in set order would let PYTHONHASHSEED decide both the primary id and
+        # the order the ids are stored in.
+        alias_sources = ("cveId", "sonatypeId", "ghsaId", "osvId", "snykId", "gsdId", "vulnDbId")
+        aliases = set()
+        for alias in dependency_track_finding["vulnerability"].get("aliases") or []:
+            for alias_source in alias_sources:
+                if alias_source in alias:
+                    aliases.add(alias[alias_source])
+        vulnerability_id = [vuln_id, *sorted(aliases - {vuln_id})]
 
         # Default CWE to CWE-1035 Using Components with Known Vulnerabilities if there is no CWE
         if "cweId" in dependency_track_finding["vulnerability"] and dependency_track_finding["vulnerability"]["cweId"] is not None:
@@ -263,6 +228,9 @@ class DependencyTrackParser:
         analysis = dependency_track_finding.get("analysis")
         is_false_positive = bool(analysis is not None and analysis.get("state") == "FALSE_POSITIVE")
 
+        if analysis is not None and analysis.get("detail"):
+            vulnerability_description += f"\nAudit Detail: {analysis['detail']}"
+
         # Get the EPSS details
         epss_percentile = dependency_track_finding["vulnerability"].get("epssPercentile", None)
 
@@ -281,6 +249,7 @@ class DependencyTrackParser:
             test=test,
             cwe=cwe,
             description=vulnerability_description,
+            mitigation=self._derive_mitigation_from_affected_versions(dependency_track_finding),
             severity=vulnerability_severity,
             false_p=is_false_positive,
             component_name=component_name,
@@ -317,7 +286,7 @@ class DependencyTrackParser:
         if epss_percentile:
             finding.epss_percentile = epss_percentile
 
-        if settings.V3_FEATURE_LOCATIONS:
+        if locations_enabled():
             if component_purl := dependency_track_finding.get("component", {}).get("purl"):
                 finding.unsaved_locations.append(
                     LocationData.dependency(purl=component_purl),

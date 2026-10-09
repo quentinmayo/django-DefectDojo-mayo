@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import ipaddress
 from contextlib import suppress
 from dataclasses import dataclass
@@ -9,7 +8,7 @@ from urllib.parse import unquote_plus, urlsplit
 
 import idna
 from django.core.exceptions import ValidationError
-from django.core.validators import MaxValueValidator, MinLengthValidator, MinValueValidator
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import IntegrityError, transaction
 from django.db.models import (
     BooleanField,
@@ -57,8 +56,48 @@ class HyperlinkParser:
         except (URLParseError, ValueError) as e:
             raise ValidationError(str(e))
 
+    @staticmethod
+    def _normalize_ipv6_authority(value: str) -> str:
+        """
+        Bracket a bare IPv6 authority so hyperlink can parse it.
+
+        RFC 3986 requires an IPv6 literal in a URL authority to be wrapped in "[...]",
+        and hyperlink only recognises an authority after "//" or a scheme. Scanners and
+        connectors routinely emit a bare IPv6 host (``fe80::1``) or a bracketed one with
+        no scheme (``[fe80::1]``); left as-is, hyperlink reads the tail as a port or the
+        leading group as a scheme and raises. Both are normalised to ``//[fe80::1]`` so
+        the host is parsed. Anything that is not a bare IPv6 authority -- hostnames,
+        IPv4, ``host:port``, userinfo, and already-schemed IPv6 URLs -- is returned
+        unchanged.
+        """
+        if not value:
+            return value
+        remainder, prefix = value, ""
+        scheme_separator = remainder.find("://")
+        if scheme_separator != -1:
+            prefix, remainder = remainder[: scheme_separator + 3], remainder[scheme_separator + 3 :]
+        elif remainder.startswith("//"):
+            prefix, remainder = "//", remainder[2:]
+        # The authority ends at the first path/query/fragment delimiter.
+        authority_end = len(remainder)
+        for delimiter in ("/", "?", "#"):
+            index = remainder.find(delimiter)
+            if index != -1:
+                authority_end = min(authority_end, index)
+        authority, rest = remainder[:authority_end], remainder[authority_end:]
+        # userinfo (and any port riding on it) makes a bare IPv6 authority ambiguous.
+        if "@" in authority:
+            return value
+        literal = authority[1:-1] if authority.startswith("[") and authority.endswith("]") else authority
+        try:
+            ipaddress.IPv6Address(literal)
+        except ValueError:
+            return value
+        # A scheme-less IPv6 authority needs "//" for hyperlink to treat it as a host.
+        return f"{prefix or '//'}[{literal}]{rest}"
+
     def parse(self, value: str) -> ParsedUrl:
-        parsed_url = self.from_text(value)
+        parsed_url = self.from_text(self._normalize_ipv6_authority(value))
 
         # A host value is required by the URL class. If we're not provided one, it's possible we can coerce things if
         # no scheme was included by making it a scheme-relative URL.
@@ -185,15 +224,6 @@ class URL(AbstractLocation):
         blank=False,
         help_text="Dictates whether the endpoint was found to have host validation issues during creation",
     )
-    identity_hash = CharField(
-        null=False,
-        blank=False,
-        max_length=64,
-        editable=False,
-        unique=True,
-        validators=[MinLengthValidator(64)],
-        help_text="The hash of the URL for uniqueness",
-    )
 
     objects = URLManager().from_queryset(URLQueryset)()
 
@@ -229,17 +259,30 @@ class URL(AbstractLocation):
             value += f"#{self.fragment}"
         return value
 
+    # Memoized canonical string, stored as (field-values key, value). unparse() does a
+    # full hyperlink round-trip plus idna encoding on every call, and a single import
+    # stringifies the same unsaved URL many times (set-dedupe hashing, __eq__,
+    # identity_hash, location_value), which made str() the top CPU cost of a
+    # locations-on import. Keying the cache by the field values keeps it correct if a
+    # field is mutated after the first str() — no invalidation hook required.
+    _str_cache: tuple[tuple, str] | None = None
+
+    def _str_key(self) -> tuple:
+        return (self.protocol, self.user_info, self.host, self.port, self.path, self.query, self.fragment)
+
     def __str__(self) -> str:
         """Return the string representation of a URL."""
+        key = self._str_key()
+        cached = self._str_cache
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        value = None
         with suppress(Exception):
-            return URL.URL_PARSING_CLASS().unparse(self)
-        return self.manual_str()
-
-    def __hash__(self) -> int:
-        return hash(str(self))
-
-    def __eq__(self, other: object) -> bool:
-        return isinstance(other, URL) and str(self) == str(other)
+            value = URL.URL_PARSING_CLASS().unparse(self)
+        if value is None:
+            value = self.manual_str()
+        self._str_cache = (key, value)
+        return value
 
     @classmethod
     def get_location_type(cls) -> str:
@@ -262,7 +305,6 @@ class URL(AbstractLocation):
         self.clean_path()
         self.clean_query()
         self.clean_fragment()
-        self.set_identity_hash()
         super().clean(*args, **kwargs)
 
     def clean_protocol(self) -> None:
@@ -323,9 +365,6 @@ class URL(AbstractLocation):
         else:
             self.query = self.replace_null_bytes(self.query.strip().removeprefix("?"))
 
-    def set_identity_hash(self):
-        self.identity_hash = hashlib.blake2b(str(self).encode(), digest_size=32).hexdigest()
-
     def replace_null_bytes(self, value: str) -> str:
         return value.replace("\x00", "%00")
 
@@ -373,7 +412,7 @@ class URL(AbstractLocation):
         query=None,
         fragment=None,
     ) -> URL:
-        url = URL(
+        return URL(
             protocol=protocol,
             user_info=user_info,
             host=host,
@@ -382,8 +421,6 @@ class URL(AbstractLocation):
             query=query,
             fragment=fragment,
         )
-        url.clean()
-        return url
 
     @staticmethod
     def create_location_from_value(value: str) -> URL:

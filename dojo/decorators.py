@@ -58,9 +58,14 @@ dojo_async_task_counter = ThreadLocalTaskCounter()
 def we_want_async(*args, func=None, **kwargs):
     from dojo.utils import get_current_user  # noqa: PLC0415 circular import
 
-    sync = kwargs.get("sync", False)
-    if sync:
-        logger.debug("dojo_async_task %s: running task in the foreground as sync=True has been found as kwarg", func)
+    force_async = kwargs.get("force_async", False)
+    if force_async:
+        logger.debug("dojo_async_task %s: running task in the background as force_async=True has been found as kwarg", func)
+        return True
+
+    force_sync = kwargs.get("force_sync", False)
+    if force_sync:
+        logger.debug("dojo_async_task %s: running task in the foreground as force_sync=True has been found as kwarg", func)
         return False
 
     user = get_current_user()
@@ -88,7 +93,7 @@ def dojo_async_task(func=None, *, signature=False):
             from dojo.utils import get_current_user  # noqa: PLC0415 circular import
 
             user = get_current_user()
-            kwargs["async_user"] = user
+            kwargs["async_user_id"] = user.id if user else None
 
             # Capture pghistory context to pass to Celery worker
             # The PgHistoryTask base class will apply this context in the worker
@@ -192,6 +197,11 @@ def require_v3_feature_set():
     def decorator(func):
         @wraps(func)
         def _wrapped_view(request, *args, **kwargs):
+            # This request gate stays on settings.V3_FEATURE_LOCATIONS rather than the
+            # runtime dojo.location.feature accessor: it is meant to guard views whose
+            # routes are mounted at boot from dojo/urls.py, so it must stay consistent
+            # with that boot-time wiring. See dojo/location/feature.py and
+            # pro/features/relabel.py:14-28.
             if not getattr(settings, "V3_FEATURE_LOCATIONS", False):
                 msg = "V3_FEATURE_LOCATIONS must be enabled."
                 raise Http404(msg)

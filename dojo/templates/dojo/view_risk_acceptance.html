@@ -1,18 +1,10 @@
 {% extends "base.html" %}
+{% load i18n %}
 {% load display_tags %}
 {% load authorization_tags %}
 {% load humanize %}
 {% load static %}
 
-{% block add_styles %}
-    {{ block.super }}
-    .chosen-container {
-    width: 70% !important;
-    }
-    .editor-toolbar, .editor-statusbar, .editor-preview-side, .CodeMirror {
-    width: 70% !important;
-    }
-{% endblock %}
 {% block add_css %}
     {{ block.super }}
     <link rel="stylesheet" href="{% static 'easymde/dist/easymde.min.css' %}">
@@ -22,7 +14,7 @@
     {% if risk_acceptance.is_expired %}
         <div class="danger-zone panel panel-danger">
             <div class="panel-heading">
-                <h3>Expired</h3>
+                <h3><i class="fa-solid fa-hourglass-end dd-card-icon" aria-hidden="true"></i>Expired</h3>
             </div>
         </div>
     {% endif %}
@@ -31,12 +23,12 @@
             <div class="panel-heading tight">
                 <div class="clearfix">
                     <h3 class="pull-left">
-                        Risk Acceptance</small>
+                        <i class="fa-solid fa-handshake dd-card-icon" aria-hidden="true"></i>Risk Acceptance</small>
                     </h3>
                 </div>
             </div>
             <br/>
-            <form id="edit_risk_acceptance" enctype="multipart/form-data"  class="form-horizontal" action="{% url 'edit_risk_acceptance' engagement.id risk_acceptance.id %}" method="post">
+            <form id="edit_risk_acceptance" enctype="multipart/form-data"  class="" action="{% url 'edit_risk_acceptance' engagement.id risk_acceptance.id %}" method="post">
                 {% csrf_token %}
                 {% if return_url %}
                     <input type="hidden" name="return_url" value="{{ return_url }}" />
@@ -54,12 +46,12 @@
             <div class="panel-heading tight">
                 <div class="clearfix">
                     <h3 class="pull-left">
-                        Risk Acceptance <small>added by {{ risk_acceptance.owner.get_full_name }}, Updated {{ risk_acceptance.updated|naturaltime|default_if_none:"" }}, Created {{ risk_acceptance.created|naturaltime|default_if_none:"" }}</small>
+                        <i class="fa-solid fa-handshake dd-card-icon" aria-hidden="true"></i>Risk Acceptance <small>added by {{ risk_acceptance.owner.get_full_name }}, Updated {{ risk_acceptance.updated|naturaltime|default_if_none:"" }}, Created {{ risk_acceptance.created|naturaltime|default_if_none:"" }}</small>
                     </h3>
 
                     <div class="dropdown pull-right">
                         <button class="btn btn-primary dropdown-toggle" type="button" id="dropdownMenu1"
-                                data-toggle="dropdown" aria-expanded="true" aria-label="Risk acceptance options">
+                                data-toggle="dropdown" aria-expanded="true" aria-label="{% trans 'Risk acceptance options' %}">
                             <span class="fa-solid fa-bars"></span>
                             <span class="caret"></span>
                         </button>
@@ -82,11 +74,15 @@
                         <th>Findings</th>
                         <th>Proof</th>
                         <th>Reactivate
-                            <i class="fa-solid fa-circle-question has-popover" data-trigger="hover" data-content="Reactivate findings when risk acceptance expires?" data-placement="right" data-container="body" data-original-title="" title="">
+                            <i class="fa-solid fa-circle-question has-popover" data-content="Reactivate findings when risk acceptance expires?">
                             </i>
                         </th>
                         <th>Restart SLA
-                            <i class="fa-solid fa-circle-question has-popover" data-trigger="hover" data-content="Restart SLA for findings when risk acceptance expires?" data-placement="right" data-container="body" data-original-title="" title="">
+                            <i class="fa-solid fa-circle-question has-popover" data-content="Restart SLA for findings when risk acceptance expires?">
+                            </i>
+                        </th>
+                        <th>Restore Verified
+                            <i class="fa-solid fa-circle-question has-popover" data-content="Mark reactivated findings Verified when risk acceptance expires?">
                             </i>
                         </th>
                         <th>Owner</th>
@@ -117,6 +113,9 @@
                         <td>
                             {{ risk_acceptance.restart_sla_expired }}
                         </td>
+                        <td>
+                            {{ risk_acceptance.restore_verified_expired }}
+                        </td>
                         <td>{{ risk_acceptance.owner.get_full_name }}</td>
                     </tr>
                 </table>
@@ -125,7 +124,7 @@
 
         <div class="panel panel-default table-responsive">
             <div class="panel-heading">
-                <h3>Decision & Recommendation</h3>
+                <h3><i class="fa-solid fa-check-to-slot dd-card-icon" aria-hidden="true"></i>Decision & Recommendation</h3>
             </div>
             <table class="table table-condensed">
                 <thead>
@@ -158,7 +157,7 @@
 
     <div id="risk_acceptance" class="panel panel-default table-responsive">
         <div class="panel-heading">
-            <h3>Findings Accepted</h3>
+            <h3><i class="fa-solid fa-bug dd-card-icon" aria-hidden="true"></i>Findings Accepted</h3>
         </div>
         {% if accepted_findings %}
             <table id="open_findings" class="table table-condensed table-striped">
@@ -190,7 +189,7 @@
                         <td>{{ finding.active }}</td>
 
                         <td>
-                            {% if engagement|has_object_permission:"Risk_Acceptance" %}
+                            {% if engagement|has_object_permission:"edit" %}
                                 <form method="post">
                                     {% csrf_token %}
                                     <input type="hidden" name="remove_finding_id" value="{{ finding.id }}"/>
@@ -215,15 +214,15 @@
         {% endif %}
     </div>
 
-    {% if engagement|has_object_permission:"Risk_Acceptance" %}
+    {% if engagement|has_object_permission:"edit" %}
         <div class="panel panel-default">
             <div class="panel-heading">
-                <h3>Accept Additional Findings</h3>
+                <h3><i class="fa-solid fa-bug dd-card-icon" aria-hidden="true"></i>Accept Additional Findings</h3>
             </div>
             <br/>
-            <form method="post" class="form-horizontal">{% csrf_token %}
+            <form method="post" class="">{% csrf_token %}
                 <div class="show_add_findings_form" style="padding: 1em;">
-                    <div class="text-left"><b>Add findings as accepted:</b></div>
+                    <div class="text-start"><b>Add findings as accepted:</b></div>
                     {{ add_findings_form.as_p }}
                 </div>
                 <div class="panel-body">
@@ -240,7 +239,7 @@
 
     <div class="panel panel-default table-responsive">
         <div class="panel-heading">
-            <h3>Uploaded Proof</h3>
+            <h3><i class="fa-solid fa-paperclip dd-card-icon" aria-hidden="true"></i>Uploaded Proof</h3>
         </div>
         <table id="doc" class="tablesorter-bootstrap table table-condensed table-striped">
             <thead>
@@ -259,7 +258,7 @@
                         {{ risk_acceptance.created }}
                     </td>
                     <td>
-                        {% if engagement|has_object_permission:"Risk_Acceptance" %}
+                        {% if engagement|has_object_permission:"edit" %}
                             <form id="replace_risk_file" enctype="multipart/form-data" method="post">
                                 {% csrf_token %}
                                 <label class="btn btn-sm btn-primary">
@@ -284,7 +283,7 @@
 
     <div class="panel panel-default">
         <div class="panel-heading">
-            <h3>Notes</h3>
+            <h3><i class="fa-solid fa-note-sticky dd-card-icon" aria-hidden="true"></i>Notes</h3>
         </div>
         {% if notes %}
             <table id="notes" class="tablesorter-bootstrap table table-condensed table-striped">
@@ -308,7 +307,7 @@
                             {{ note }}
                         </td>
                         <td>
-                            {% if engagement|has_object_permission:"Risk_Acceptance" %}
+                            {% if engagement|has_object_permission:"edit" %}
                                 <form method="post">
                                     {% csrf_token %}
                                     <input type="hidden" name="delete_note_id" value="{{ note.id }}"/>
@@ -328,7 +327,7 @@
             <p class="text-center">No notes saved.</p>
         {% endif %}
         <hr/>
-        <form class="form-horizontal" method="post">{% csrf_token %}
+        <form class="" method="post">{% csrf_token %}
             {% include "dojo/form_fields.html" with form=note_form %}
             <div class="form-group">
                 <div class="col-sm-offset-2 col-sm-10">

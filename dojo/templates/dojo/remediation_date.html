@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% load i18n %}
 {% load event_tags %}
 {% block content %}
     {{ block.super }}
@@ -6,13 +7,13 @@
     <h4>{{ finding.title }}</h4>
       <p>Please provide the date the Finding will be remediated in the environment it was discovered.</p>
 
-    <form class="form-horizontal" action="{% url 'remediation_date' finding.id %}" method="post">
+    <form class="" action="{% url 'remediation_date' finding.id %}" method="post">
         {% csrf_token %}
         {% include "dojo/form_fields.html" with form=form %}
         <div class="form-group">
             <div class="col-sm-offset-2 col-sm-10">
 
-                <input class="btn btn-primary" name='submit' type="submit" value="Save" aria-label="Save"/>
+                <input class="btn btn-primary" name='submit' type="submit" value="Save" aria-label="{% trans 'Save' %}"/>
 
             </div>
         </div>

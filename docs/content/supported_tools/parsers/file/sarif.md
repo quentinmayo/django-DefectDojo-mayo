@@ -1,6 +1,8 @@
 ---
 title: "SARIF"
 toc_hide: true
+aliases:
+  - "/en/connecting_your_tools/parsers/file/sarif/"
 ---
 OASIS Static Analysis Results Interchange Format (SARIF). SARIF is
 supported by many tools. More details about the format here:
@@ -23,7 +25,7 @@ For example:
 | Dockle | `Dockle` | `Dockle Scan (SARIF)` |
 | MobSF | `mobsfscan` | `mobsfscan (SARIF)` |
 
-This means that even though all of these tools produce SARIF output and are imported with `scan_type=SARIF`, each tool will create a **distinct Test Type** in DefectDojo. For more information on how report-defined Test Types work, see **[Test Types](/asset_modelling/hierarchy/product_hierarchy#test-types)**.
+This means that even though all of these tools produce SARIF output and are imported with `scan_type=SARIF`, each tool will create a **distinct Test Type** in DefectDojo. For more information on how report-defined Test Types work, see **[Test Types](/asset_modelling/os_hierarchy/product_hierarchy#test-types)**.
 
 ## Reimporting SARIF Results
 

@@ -11,11 +11,11 @@
             <div class="panel panel-default">
                 <div class="panel-heading tight">
                     <h3 class="has-filters">
-                        Edit {{ filter_name }}
+                        <i class="fa-solid fa-layer-group dd-card-icon" aria-hidden="true"></i>Edit {{ filter_name }}
                     </h3>
                 </div>
             </div>
-            <form class="form-horizontal" method="post">
+            <form class="" method="post">
                 {% csrf_token %}
                 {% include "dojo/form_fields.html" with form=edit_finding_group_form %}
 
